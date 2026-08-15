@@ -349,9 +349,8 @@ class cdn_pcie_hls_bridge_monitor extends uvm_component implements I_cdn_pcie_hl
     end
     // QOS TX FIFO and count arrays
     m_qos_slv_ended_af = new("m_qos_slv_ended_af", this);
-    // QOS counter groups follow DUT hls_bridge_qos layout: NUM_TLP_STREAMS * 4
-    // (must use NUM_TLP_STREAMS, not LBB_NUM_TLP_STREAMS — RTL counter_num is sized by NUM_TLP_STREAMS)
-    for (int g = 0; g < (parameters_cfg_pkg::NUM_TLP_STREAMS * 4); g++) begin
+    // QOS counter groups: LBB_NUM_TLP_STREAMS * 4 (P&REQ, NP&REQ, P&RESP, NP&RESP)
+    for (int g = 0; g < (parameters_cfg_pkg::LBB_NUM_TLP_STREAMS * 4); g++) begin
       m_qos_expected_count[g] = 0;
       m_qos_observed_count[g] = 0;
     end  
@@ -1513,12 +1512,12 @@ endfunction
 
         // MSI QoS: internal path increments both P&REQ and P&RESP for the stream
         m_qos_expected_count[l_stream]++;
-        m_qos_expected_count[2 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream]++;
+        m_qos_expected_count[2 * parameters_cfg_pkg::LBB_NUM_TLP_STREAMS + l_stream]++;
         `uvm_info("QOS_EXP_MSI", $sformatf("MSI -> P&REQ group=%0d AND P&RESP group=%0d (stream=%0d); expected[%0d]=%0d expected[%0d]=%0d",
-                  l_stream, 2 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream, l_stream,
+                  l_stream, 2 * parameters_cfg_pkg::LBB_NUM_TLP_STREAMS + l_stream, l_stream,
                   l_stream, m_qos_expected_count[l_stream],
-                  2 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream,
-                  m_qos_expected_count[2 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream]), UVM_MEDIUM)
+                  2 * parameters_cfg_pkg::LBB_NUM_TLP_STREAMS + l_stream,
+                  m_qos_expected_count[2 * parameters_cfg_pkg::LBB_NUM_TLP_STREAMS + l_stream]), UVM_MEDIUM)
 
 `ifndef HLS_BRIDGE_TB_IN_PASSIVE_MODE
         msi_clk_gater_vif.unfinished_packets++;
@@ -3390,11 +3389,11 @@ endfunction
 
   //----------------------------------------------------------------------------
   // QOS expected-count helpers (mirror hls_bridge_qos / hls_bridge_qos_dti_pck_enc)
-  // Counter groups: 0=P&REQ, 1=NP&REQ, 2=P&RESP, 3=NP&RESP; each group has NUM_TLP_STREAMS slots.
+  // Counter groups: 0=P&REQ, 1=NP&REQ, 2=P&RESP, 3=NP&RESP; each group has LBB_NUM_TLP_STREAMS slots.
   //----------------------------------------------------------------------------
   function int qos_group_idx(bit tlp_type, bit qos_type, int unsigned stream);
     int unsigned l_group_base = tlp_type ? (qos_type ? 3 : 1) : (qos_type ? 2 : 0);
-    return l_group_base * parameters_cfg_pkg::NUM_TLP_STREAMS + stream;
+    return l_group_base * parameters_cfg_pkg::LBB_NUM_TLP_STREAMS + stream;
   endfunction : qos_group_idx
 
   function string qos_group_name(bit tlp_type, bit qos_type);
@@ -3505,10 +3504,10 @@ endfunction
  
          // {qos_type[13], tlp_type[14]} -> P&REQ / NP&REQ / P&RESP / NP&RESP
          case ({l_count_data[13], l_count_data[14]})
-            2'b00: l_group_idx = 0 * parameters_cfg_pkg::NUM_TLP_STREAMS + int'(3'(l_count_data[17:15]));
-            2'b01: l_group_idx = 1 * parameters_cfg_pkg::NUM_TLP_STREAMS + int'(3'(l_count_data[17:15]));
-            2'b10: l_group_idx = 2 * parameters_cfg_pkg::NUM_TLP_STREAMS + int'(3'(l_count_data[17:15]));
-            2'b11: l_group_idx = 3 * parameters_cfg_pkg::NUM_TLP_STREAMS + int'(3'(l_count_data[17:15]));
+            2'b00: l_group_idx = 0 * parameters_cfg_pkg::LBB_NUM_TLP_STREAMS + int'(3'(l_count_data[17:15]));
+            2'b01: l_group_idx = 1 * parameters_cfg_pkg::LBB_NUM_TLP_STREAMS + int'(3'(l_count_data[17:15]));
+            2'b10: l_group_idx = 2 * parameters_cfg_pkg::LBB_NUM_TLP_STREAMS + int'(3'(l_count_data[17:15]));
+            2'b11: l_group_idx = 3 * parameters_cfg_pkg::LBB_NUM_TLP_STREAMS + int'(3'(l_count_data[17:15]));
             default: l_group_idx = 0;
          endcase
 	`uvm_info("QOS_TX",$sformatf("TX DUT: tdata=0x%06h count=0x%0h qos_type=%0b tlp_type=%0b stream=%0d group=%0d expected=%0d observed_before=%0d",
