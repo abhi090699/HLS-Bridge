@@ -1,0 +1,1520 @@
+================================================================================
+HLS BRIDGE VIP EXPERIENCE — INTERVIEW ANSWERS (FROM REPO)
+================================================================================
+Source: Cadence PCIe HLS Bridge verification TB in this repository
+(env.sv, monitor.sv, env_config.sv, ib_posted_order_checker.sv,
+ob_merge_prectictor.sv, tag_manager.sv, vsequncer.sv, vseq.sv, test.sv,
+sceanrio.sv, cif_tlp_router.sv, base_test.sv, Makefile, qos_spec.txt, etc.)
+
+Answers combine (a) what the code actually does and (b) solid interview-style
+explanations for UVM / PCIe concepts the resume lines imply.
+
+================================================================================
+LINE 1: UVM-Based Verification Environment
+================================================================================
+
+Q1: Explain the architecture of your UVM-based verification environment.
+What were the key components and how did they interact?
+
+A1:
+Top class is cdn_pcie_hls_bridge_env (env.sv). It builds:
+- Clock / reset envs (core, AXI-DTI, AXI-MSI, AXI-Lite)
+- HAL-side CXS HLS envs for OB/IB Posted, Non-Posted, Completion
+- Per-port AXI-side CXS HLS envs sized by parameters_cfg_pkg::NUM_HLS_PORTS
+- AXI-Stream VIP envs: HDR2LOG, Delivered Count, QoS, LTI Completions, MSI
+- AXI-Lite master/slave
+- HPA trans envs (CIF TLP router + tag manager) for OB and IB
+- Optional DTI / DTI-ATS envs when DTI_TB_IN_PASSIVE_MODE
+
+cdn_pcie_hls_bridge_monitor owns predictors, CXS scoreboards, IB posted order
+checker, and TLM analysis FIFOs/ports that connect VIP monitors to checkers.
+cdn_pcie_hls_bridge_vsequencer (vsequncer.sv) holds handles to all protocol
+sequencers and coordinates traffic via virtual sequences (vseq.sv).
+Config flows through cdn_pcie_hls_bridge_env_config + uvm_config_db.
+
+Q2: How did you integrate multiple protocol VIPs (CXS, AXI-Stream) into a
+single environment? What challenges did you face?
+
+A2:
+Each VIP is wrapped in its own UVC env (cdn_hls_env for CXS/HLS, cdn_axi_stream_vip_env
+for AXI-Stream, cdn_axi_env for AXI-Lite). env_config.sv programs every agent
+via uvm_config_db (active/passive, direction CDN_HLS_TX/RX, cov cfg).
+Challenges:
+- Directionality differs (HAL OB is RX from VIP view; AXI OB is TX)
+- Data-width/port-count parameterization (HLS_PORT_DATA_WIDTH_ARR, NUM_HLS_PORTS)
+- Synchronizing quietness across CXS, scoreboards, and tag LUT at end of test
+- Multiple reset domains (core vs AXI MSI/DTI vs AXI-Lite)
+
+Q3: What is the HLS Bridge IP? What was its primary function in the PCIe
+Gen7 context?
+
+A3:
+HLS Bridge (hls_bridge_top.v) is the High-Level Synthesis / Host Link Stream
+bridge between the PCIe HAL (CXS) and client AXI-side HLS ports (plus optional
+DTI and MSI). It routes Posted / Non-Posted / Completion TLPs both Outbound
+(client→PCIe) and Inbound (PCIe→client), supports FM/NFM, multi-port widths
+128/256/512/1024, credit limits, QoS delivered counts, and Gen6/Gen7 flit
+mode (KMAX_FLIT_MODE_SUPPORT / m_misc_flit_mode).
+
+Q4: Why did you choose UVM for this verification environment? What advantages
+did it provide over other methodologies?
+
+A4:
+UVM gave factory overrides (base_test.sv overrides CXS driver, tlp2cxs seq,
+IDE config, random policies), phased build/connect/run, config_db for
+per-agent knobs, TLM analysis for monitor→predictor→scoreboard, and reusable
+sequences across directed + constrained-random tests. For a multi-VIP Gen7
+DUT this is far more scalable than ad-hoc testbenches.
+
+Q5: How did you handle the integration of CXS VIP with AXI-Stream VIP?
+What were the interface compatibility issues?
+
+A5:
+CXS carries TLP streams (denaliCxsTransaction) with UserControl metadata
+(RO, ID group, etc.). AXI-Stream VIPs carry HDR2LOG, delivered-count, QoS,
+LTI, MSI (denaliStreamTransaction). Compatibility issues were:
+- Different transaction types → typed TLM FIFOs per interface
+- Metadata packing/unpacking ({<<byte{cxs_pkt.UserControl}})
+- Delivered-count stream encoding (9-bit count + ID group bits)
+- Credit/backpressure on CXS vs ready/valid on AXI-Stream
+- Clock/reset domain differences between core and AXI domains
+
+Q6: What was your role in enhancing the existing environment? What specific
+improvements did you make?
+
+A6 (grounded in repo enhancements):
+- IB posted order checker across AXI/DTI/MSI with RO/VC/TC disable paths
+- OB merge predictors for multi-port packet arbitration prediction
+- Split-completion tracking + coverage hooks for UIO OB/IB
+- Custom CXS driver override (cdn_pcie_hls_bridge_cxs_driver)
+- Backpressure / credit-limit scenario knobs
+- Directed UIO tests (test.sv) with factory TLP overrides
+- QoS / delivered-count scoreboarding and quietness waits in vseq
+
+Q7: How did you structure your UVM environment? Draw the block diagram.
+
+A7 (ASCII):
+  uvm_test (cdn_pcie_hls_bridge_*_test)
+       |
+  env (cdn_pcie_hls_bridge_env)
+   |-- clk / multi-domain reset envs
+   |-- HAL CXS: OB P/NP/CPL + IB P/NP/CPL
+   |-- AXI CXS[NUM_HLS_PORTS]: OB+IB P/NP/CPL
+   |-- AXI-Stream: HDR2LOG, DC, QoS, LTI, MSI
+   |-- AXI-Lite M/S
+   |-- HPA OB/IB trans (CIF router + tag_manager)
+   |-- optional DTI / ATS
+   |-- monitor
+         |-- OB merge predictors (P/NP)
+         |-- CXS scoreboards (OB/IB, AXI/DTI)
+         |-- IB posted order checker
+         |-- TLM analysis ports/FIFOs
+  vsequencer <-> virtual sequences (vseq)
+
+Q8: What were the key challenges in developing the verification environment for
+Gen7 PCIe?
+
+A8:
+- Flit Mode vs Non-Flit Mode (m_misc_flit_mode 2'b10 vs 2'b01)
+- Wide datapaths up to 1024-bit and multi-TLP/clk packing
+- Dual HLS ports + DTI + MSI routing and ordering
+- 10/14-bit tags and UIO tag management
+- IDE/TDISP Gen7 modes (HPA2_IDE_GEN7)
+- Ordering with Relaxed Ordering + multi-interface latency
+- Regression matrix (FM/NFM × widths × port configs) via vManager/IMC
+
+Q9: How did you ensure the environment could handle different data widths
+(128/256/512/1024-bit)?
+
+A9:
+parameters_cfg_pkg::HLS_PORT_DATA_WIDTH_ARR and KMAX_DATAPATH_WD parameterize
+port width. env_config.get_hls_port_data_width() reads per-port width.
+vseq sizes HDR2LOG sequences from width/8; DW alignment constraints in
+sceanrio.sv force 2DW when 128-bit + 2 TLPs/clk. Coverage/Makefile configs
+include paths like 1024dp/fm/... for each width build.
+
+Q10: What configuration management techniques did you use for different IP
+configurations?
+
+A10:
+- Compile-time parameters_cfg_pkg (NUM_HLS_PORTS, widths, DTI/MSI/IDE/FM)
+- Runtime scenario (cdn_pcie_hls_bridge_scenario) with rand knobs + constraints
+- Strap / dev_top policies (base_test / test.sv policy classes)
+- uvm_config_db sets for every UVC agent
+- Factory type overrides per test
+- misc_if API for flit mode, route_en, tag management straps
+
+--------------------------------------------------------------------------------
+CROSS-QUESTIONS (Line 1)
+--------------------------------------------------------------------------------
+
+Q11: What are the different phases in UVM and how did you use them?
+
+A11:
+build_phase: create envs, predictors, scoreboards, FIFOs (env/monitor).
+connect_phase: TLM port/export/FIFO connections.
+end_of_elaboration / start_of_simulation: config checks.
+run-time phases (reset/configure/main/shutdown): virtual sequences, traffic,
+order checking forever tasks in main_phase.
+check_phase: predictors/scoreboards is_balanced() empty-queue checks.
+report_phase: coverage/summary.
+
+Q12: How did you implement the virtual sequencer for coordinating multiple
+protocol sequencers?
+
+A12:
+cdn_pcie_hls_bridge_vsequencer holds clk/rst sequencers, per-port CXS
+sequencers (OB P/NP/CPL AXI + IB HAL), AXI-Lite, HDR2LOG/DC/QoS/LTI stream
+sequencers, plus TLM FIFOs for delivered TLPs/QoS. Virtual sequences cast
+p_sequencer and start child sequences on the right sqr handles; reset API
+stops CXS/TLP sequences cleanly.
+
+Q13: What is the difference between TLM-1 and TLM-2? Which did you use and why?
+
+A13:
+TLM-1: put/get/peek, analysis ports — classic UVM verification connectivity.
+TLM-2: generic payload, sockets, primarily SystemC/transaction-accurate modeling.
+We used TLM-1 (uvm_analysis_port, uvm_tlm_analysis_fifo) because VIP monitors
+broadcast completed packets to multiple consumers (predictor, scoreboard,
+order checker) without blocking the monitor.
+
+Q14: How did you handle clock domain crossing between CXS and AXI-Stream?
+
+A14:
+Separate reset envs (core vs axi_dti / axi_msi / axil). Scoreboards and order
+checker use transaction-level TLM (not cycle-accurate CDC), comparing after
+packet end events. Quietness waits and timers (m_hpa_timer) absorb domain
+latency. DUT misc/credit interfaces model per-domain ready/credit behavior.
+
+Q15: What config mechanisms did you use to support different IP configurations?
+
+A15:
+uvm_config_db for agent cfg objects; scenario + strap/dev policies; parameters
+package; misc_if_api setters (flit mode, route_en); coverage collector cfgs;
+plusargs/Makefile COV and build variants (fm/nfm, widths, ports).
+
+Q16: How did you ensure your environment was reusable for different configurations?
+
+A16:
+Arrays sized by NUM_HLS_PORTS; ifdef DTI_TB_IN_PASSIVE_MODE; factory overrides
+instead of hard-coded types; scenario constraints keyed off parameters
+(KMAX_FLIT_MODE_SUPPORT, KMAX_DTI_SUPPORT, IDE); active/passive agents so the
+same env works as master or monitor-only.
+
+Q17: What is the difference between uvm_component and uvm_object?
+
+A17:
+uvm_component: hierarchy, phases, config_db by path, reporting (env, monitor,
+scoreboard, driver, sequencer).
+uvm_object: transactions, sequences, configs (cdn_hpa_pcie_tlp, scenario,
+env_config) — created/destroyed freely, no phases.
+
+Q18: How did you use factory overrides in your environment?
+
+A18:
+base_test.sv:
+set_type_override_by_type(cdnCxsUvmDriver → cdn_pcie_hls_bridge_cxs_driver)
+tlp2cxs_seq, IDE config, and random policy overrides.
+Directed UIO tests override cdn_hpa_pcie_tlp with constrained UIO types.
+
+Q19: What is the difference between build_phase and connect_phase?
+
+A19:
+build_phase: construct components top-down.
+connect_phase: wire TLM ports/exports/FIFOs and virtual interfaces after children
+exist. Creating in connect would break hierarchy; connecting in build may
+hit null child handles.
+
+Q20: How did you implement the configuration database in your environment?
+
+A20:
+env_config.configure_* methods set uvm_config_db#(...) for each agent path
+using m_env_name. Also sets interface APIs (k_if, misc_if, crd_lmt_if).
+Components get() their cfg in build_phase. This isolates compile parameters
+from per-test runtime knobs.
+
+================================================================================
+LINE 2: PCIe TLP Traffic Verification
+================================================================================
+
+Q21: Explain OB vs IB TLP traffic and how you verified both.
+
+A21:
+OB (Outbound): client/AXI HLS → HAL/PCIe. Env has OB AXI drivers/monitors and
+HAL OB monitors; OB merge predictors + OB CXS scoreboards.
+IB (Inbound): HAL/PCIe → AXI/DTI/MSI. IB HAL drivers inject; IB AXI/DTI/MSI
+monitors observe; IB scoreboards + IB posted order checker.
+Separate P/NP/CPL channels each direction.
+
+Q22: What are Posted, Non-Posted, and Completion TLPs? How verified?
+
+A22:
+Posted (MWr, Msg): no completion; verified with posted monitors/scoreboards
+and IB posted order checker.
+Non-Posted (MRd,Cfg,IO,UIOMRd): need completions; tag_manager allocates/
+releases tags; NP scoreboards + completion LUT.
+Completions (Cpl/CplD): matched by tag; split-completion tracking in monitor;
+out-of-order scoreboard options for OB.
+
+Q23: What is HAL-side CXS vs AXI-side HLS?
+
+A23:
+HAL-side CXS: PCIe controller flit/CXS interface (single logical HAL streams
+for OB/IB P/NP/CPL).
+AXI-side HLS: client-facing HLS ports (array NUM_HLS_PORTS), each with its
+own CXS-like HLS VIP env, possibly different data widths; also AXI-Stream
+aux interfaces (DC, QoS, HDR2LOG).
+
+Q24: What are HLS ports? Why dual HLS-port configurations?
+
+A24:
+HLS ports are client datapath ports on the AXI bridge side. Dual/multi-port
+allows multiple clients or wider aggregate bandwidth, independent widths, and
+inbound splitting schemes (port0 force, IDG/VC/TC/address/function based —
+see monitor cover_hls_ib_*_splitting_scheme).
+
+Q25: How did you ensure TLP routing correctness across HLS ports and CXS?
+
+A25:
+CIF TLP router (cif_tlp_router.sv) + scenario m_hls_bridge_route_en /
+m_ib_target. Monitor predicts routing to AXI/DTI/MSI, scoreboards compare
+expected vs actual CXS packets, order checker validates posted delivery order
+per dest port / HLS port / ID group. Delivered-count streams confirm how many
+packets were drained per ID group.
+
+Q26: Describe flow of an Outbound Non-Posted MRd from generation to completion
+verification.
+
+A26:
+1) Virtual seq / HPA TLP seq creates MRd (or UIOMRd).
+2) Tag manager allocates a tag (8/10/14-bit or UIO scheme).
+3) tlp2cxs converts to CXS; driven on OB NP AXI HLS port.
+4) DUT bridges to HAL OB NP CXS; monitor captures both sides.
+5) OB NP merge predictor + scoreboard check HAL observation.
+6) Completion returns IB/OB CPL path; tag manager releases tag on CPL
+   (or CPL timeout path m_released_tag_by_cpl_TO).
+7) Completions scoreboarded; split CPL tracking if multiple CPL/CplD.
+
+Q27: What techniques ensured data integrity across OB/IB?
+
+A27:
+CXS scoreboards with user-control and end-error compares; payload byte
+compare; delivered-count vs expected queue; order checker data_bytes match;
+IDE integrity modes when enabled; end-of-test empty queue checks.
+
+Q28: How did you verify PCIe ordering rules for Posted vs Non-Posted?
+
+A28:
+IB posted order checker enforces P-after-P delivery across interfaces unless
+RO/VC/TC routing disables checks. NP uses tags and can complete out-of-order;
+OB scoreboards can enable m_en_out_of_order_scb for P/NP/CPL on single-port
+AXI+DTI cases (PCIE-20784 comment in monitor).
+
+Q29: How did you handle dual HLS-port configurations?
+
+A29:
+All AXI-side envs, sequencers, FIFOs, scoreboards are arrays [NUM_HLS_PORTS].
+OB merge predictor sorts/merges per-port start/end events. IB splitting
+coverage tracks which scheme chose which port. Loop_port forks in vseq and
+order checker main_phase.
+
+Q30: Specific Gen7 traffic challenges?
+
+A30:
+Flit packing/gaps (m_enable_pkt_gaps), 1024-bit datapath, multi-TLP/clk,
+extended tags, IDE/TDISP, RO routing under HPA2_IDE_GEN7, ATS invalidations
+when DTI enabled, performance vs backpressure credit limits.
+
+--------------------------------------------------------------------------------
+CROSS-QUESTIONS (Line 2)
+--------------------------------------------------------------------------------
+
+Q31: TLP vs DLLP? How verified both?
+
+A31:
+TLP = Transaction Layer Packet (Mem/Cfg/IO/Msg/Cpl) — primary HLS Bridge
+focus via HPA TLP + CXS.
+DLLP = Data Link Layer Packet (ACK/NAK, FC Update, PM) — typically VIP/link
+layer; bridge TB focuses on TLP/CXS. FC is modeled via credit limit interfaces
+(crd_lmt_if) rather than raw DLLP checking at bridge unit level.
+
+Q32: How did you implement scoreboards for OB and IB TLP flows?
+
+A32:
+cdn_pcie_tl_cxs_scoreboard instances for OB P/NP/CPL and per-port IB P/NP
+(+ DTI). Expected from predictors/HAL; actual from AXI/DTI monitors.
+Analysis FIFOs feed them; out-of-order flag where legal; check_phase
+balance.
+
+Q33: AXI-Stream vs CXS? Why both?
+
+A33:
+CXS: packetized TLP streaming with SOP/EOP, credits, flit concepts — main
+datapath.
+AXI-Stream: auxiliary control/telemetry (delivered count, QoS counts,
+HDR2LOG, MSI, LTI). Both needed because DUT exposes both styles of interfaces.
+
+Q34: Multiple HLS ports — routing mechanism?
+
+A34:
+Inbound splitting schemes: FORCE_PORT_0, IDG_BASED, VC_BASED, TC_BASED,
+TARGET_FUNCTION_BASED, ADDRESS_BASED, RANDOM (monitor). Route enable struct
+controls axi_force, RO, VC, TC, IDG, addr window. OB merge predictor models
+egress merge order.
+
+Q35: Tag manager for Non-Posted requests?
+
+A35:
+cdn_pcie_hpa_tag_manager: allocates tags (sequential up/down, random, LRU),
+tracks available/consumed/discarded, blocks generation when exhausted,
+releases on CPL / FLR / CPL timeout, supports 8/10/14-bit and UIO tag modes,
+holds compl_lut_obj keyed by tag.
+
+Q36: Split completions for large reads?
+
+A36:
+monitor track_split_ob_completion / track_split_ib_completion track multiple
+CPLs per tag (cpl_seen_map), cover random-order split Cpl/CplD for UIO RD/WR.
+CIF router can shuffle UIO completion ordering in queues.
+
+Q37: Posted vs Non-Posted processing difference?
+
+A37:
+Posted: fire-and-forget, ordering-sensitive across sinks, no tag.
+NP: tag allocated, completion required, can stall on tag exhaustion, timeout
+paths, split CPL possible.
+
+Q38: Completion timeout scenarios?
+
+A38:
+Tag manager tracks m_released_tag_by_cpl_TO; CPL with cpl_err_code
+CDN_HPA_PCIE_CPL_TO releases tag. Timers (10/100/1000us knobs) and TODO
+coverage notes exist for vplan completion timeout.
+
+Q39: 10-bit vs 14-bit tags?
+
+A39:
+10-bit extended tags (up to 768/1024 tags depending on PH) vs 14-bit
+(PCIe 5.0+/6+ scale). Tag manager has tag_manager_10_bit and
+tag_manager_14_bit modes selecting max_tags and tag field composition
+(tag + t8/t9 + 14-bit tagscale in router logs).
+
+Q40: ATS translation requests?
+
+A40:
+With DTI_TB_IN_PASSIVE_MODE: dti_ats_env, scenario knobs m_num_ats_inv_reqs,
+m_force_ats_trans_fault, m_dti_inv_tc. Router sets IDO reserved for
+translation completions. ATS is verified mainly on DTI path, not plain AXI.
+
+================================================================================
+LINE 3: Monitors, Predictors, and Checkers
+================================================================================
+
+Q41: Role of a monitor? How enhanced?
+
+A41:
+Passive observer: samples VIP analysis exports into TLM FIFOs, converts to
+TLPs, drives predictors/scoreboards/order checker/coverage. Enhancements:
+multi-port FIFOs, QoS APs, credit APs, split CPL tracking, coverage virtual
+tasks, quietness helpers, reset-aware clears.
+
+Q42: Monitor vs predictor? How implemented both?
+
+A42:
+Monitor: observe DUT/VIP interfaces.
+Predictor (reference model): from observed inputs, predict expected outputs.
+OB merge predictor sorts ended packets from multiple ports and publishes
+predicted CXS order via analysis port to scoreboard. IB path predicts
+delivered port transactions into order checker expected queue.
+
+Q43: TLM analysis ports and FIFOs?
+
+A43:
+Monitors write uvm_analysis_port.write(). Multiple consumers connect via
+analysis_export or uvm_tlm_analysis_fifo (decouples timing). Example:
+m_in_act_p_axi_cxs_pkt_ended_af[port], m_in_exp_p_pkt_ended_af. Forever get()
+tasks in checkers process asynchronously.
+
+Q44: Validate packet routing across interfaces?
+
+A44:
+Compare predicted dest (AXI port / DTI / MSI) vs observed ended packets;
+delivered-count must match drained expected queue entries per ID group;
+routing enable and RO metadata influence checker behavior; uvm_error on
+mismatch.
+
+Q45: Verify PCIe ordering rules — which requirements?
+
+A45:
+For IB posted: a packet must not complete on a dest before earlier same
+ID-group posted packets destined elsewhere are delivered (check_p_p_ordering).
+RO bit or route_en.ro/vc/tc disables strict check and samples coverage.
+Per-port / DTI / MSI debug disable registers can skip checks.
+
+Q46: Protocol-specific checkers?
+
+A46:
+CXS scoreboards (payload/user/end-err), IB posted order checker, delivered-
+count consistency, credit-related checks via crd_lmt, QoS aggregation checks,
+VIP built-in protocol checkers enabled by checks_enable/coverage_enable.
+
+Q47: End-to-end data integrity mechanism?
+
+A47:
+Capture bytes on source, predict transform/route, compare on sink scoreboard;
+UserControl metadata must match; end_err compared; IDE when enabled; final
+is_balanced() ensures no stranded expected/actual.
+
+Q48: Debug monitor failures?
+
+A48:
+UVM_DEBUG tabular prints (print_table of expected posted queue), waveform on
+CXS/AXI-Stream, seed re-run in vManager, verbosity, compare DataPerPktRx vs
+expected, check RO disable path false negatives, confirm FIFO connections.
+
+Q49: How did you implement the predictor? What did it predict?
+
+A49:
+cdn_pcie_hls_bridge_hls_ob_merge_predictor: on pkt end per port, push to
+sorted_queue, then send_available_tr emits predicted merged order to scoreboard.
+Also covergroups for ports_active_in_cycle and port transitions. Separate
+instances for posted and non-posted.
+
+Q50: How ensure checkers caught all protocol violations?
+
+A50:
+checks_enable gating, end-of-test non-empty queue errors, coverage for disable
+paths (so "skipped check" is visible), regression across FM/NFM/widths,
+directed corner tests, assertions/VIP checks plus custom scoreboards.
+
+--------------------------------------------------------------------------------
+CROSS-QUESTIONS (Line 3)
+--------------------------------------------------------------------------------
+
+Q51: analysis_port vs analysis_export?
+
+A51:
+analysis_port: broadcast write() to connected exports.
+analysis_export: receive side implemented by component or FIFO.
+Connection: port.connect(export) or port.connect(fifo.analysis_export).
+
+Q52: Predictor implementation (again)?
+
+A52:
+See Q49 — reference model component using TLM FIFOs in, analysis port out,
+check_phase emptiness check.
+
+Q53: Scoreboard vs checker?
+
+A53:
+Scoreboard: expected vs actual transaction compare (data path).
+Checker: rules/invariants (ordering, credits) that may not be 1:1 packet
+compare. We used both.
+
+Q54: Latency mismatches expected vs observed?
+
+A54:
+TLM FIFOs absorb skew; scoreboard waits for matching actual; out-of-order
+mode when legal; quietness loops with extended timeouts under backpressure
+(vseq uses 400 vs 50 / 8000 vs 3000 waits).
+
+Q55: In-order vs out-of-order checking?
+
+A55:
+In-order: FIFO pop compare.
+Out-of-order: associative match by tag/key (m_en_out_of_order_scb=1).
+Order checker is rule-based, not pure scoreboard.
+
+Q56: Non-intrusive monitors?
+
+A56:
+Passive VIP agents (psv_agent) sample interfaces without driving; active only
+where TB must stimulate. Monitors never drive DUT signals.
+
+Q57: Monitor vs driver?
+
+A57:
+Driver: consumes sequences, drives IF.
+Monitor: observes IF, emits transactions. Separated so checking works in
+passive/full-chip too.
+
+Q58: TLM FIFOs implementation?
+
+A58:
+new() in build_phase sized/named per port; connected in connect_phase;
+forever get() in main_phase tasks; flush on reset via perform_*_reset APIs.
+
+Q59: Blocking vs non-blocking TLM?
+
+A59:
+Blocking get/put wait for data/space.
+Non-blocking try_get/try_put return status.
+Analysis write is non-blocking broadcast. We used blocking get in checkers and
+analysis write from monitors.
+
+Q60: Transaction duplication in monitors?
+
+A60:
+Careful single connection topology; started vs ended events are distinct FIFOs;
+hash-zero-delay wait in predictor avoids start/end race; debug prints detect
+double-push via unbalanced queues at check_phase.
+
+================================================================================
+LINE 4: Directed and Constrained-Random Tests
+================================================================================
+
+Q61: What is UIO? Why important?
+
+A61:
+User I/O TLPs (UIOMRd/UIOMWr) — special NP/posted-like client I/O over PCIe
+HLS path. Directed tests in test.sv constrain m_tlp_type to UIOMRd/UIOMWr.
+Important for client register/IO semantics, tag schemes (uio_tag_manager_bit),
+and split completion ordering coverage.
+
+Q62: Directed tests — when over constrained-random?
+
+A62:
+Directed UIO RD, RD/WR, OB UIO, strap/policy forced scenarios — when needing
+exact type mix, IB_TARGET_AXI, or coverage holes random rarely hits (split
+random-order CPL, specific route_en, reset-with-traffic).
+
+Q63: Constrained-random — key constraints?
+
+A63:
+sceanrio.sv: TLP burst/count dists, backpressure none by default, flit mode
+from KMAX_FLIT_MODE_SUPPORT, credit limit dists, DW alignment, route_en
+onehot0, pack_max_tlp, IDE/TDISP, rate_max for FM, UIO VC counts, etc.
+
+Q64: Backpressure in HLS Bridge? How tested?
+
+A64:
+When consumer withholds ready/credits, DUT must stall cleanly.
+en_backpressure_ob/ib in env_config; scenario m_backpressure_scenario;
+credit limits (crd_lmt_*); vseq extends quietness timeouts. CXS credits and
+AXI-Stream ready used as mechanisms.
+
+Q65: FM vs NFM? How verified both?
+
+A65:
+FM (Flit Mode, Gen6/7): m_misc_flit_mode==2'b10 when k_flit_mode_support.
+NFM: 2'b01. Constraints solve flit support before misc mode. Makefile
+regression configs include fm/ and coverage_gen7.tcl. Packet gaps only in
+certain OB alignments under FM.
+
+Q66: Reset scenarios?
+
+A66:
+m_num_hard_resets / m_num_link_downs in scenario; multi-domain reset sequencers;
+vsequencer/monitor/order checker implement I_cdn_pcie_hls_bridge_reset and
+perform_*_reset to stop sequences and flush state; tests force more TLPs when
+resets planned.
+
+Q67: Corner cases?
+
+A67:
+Tag exhaustion, split random-order completions, multi-port same-cycle starts
+(predictor coverage), RO vs strict ordering, credit=edge values, axi slave
+error injection, unmapped reg (constrained off by default), link-down with
+stop_cxs_driver, 128-bit 2-TLP/clk alignment.
+
+Q68: Mixed IB/OB traffic challenges?
+
+A68:
+Shared tag/credit resources, dual-direction scoreboard quietness, reset during
+both directions, ordering only on IB posted while OB may be OoO, sequencer
+arbitration on virtual sequencer, longer drain times.
+
+Q69: Combining directed and constrained-random?
+
+A69:
+Base random scenario + factory overrides / scenario subclasses for directed
+slices; regressions run both sanity (m_sanity_test→few TLPs) and heavy random;
+coverage drives adding directed tests for holes.
+
+Q70: Most complex scenarios?
+
+A70:
+Backpressure + multi-port + RO ordering; reset/link-down mid-traffic with
+scoreboard drain; UIO split completions out-of-order; FM 1024-bit with
+max packing; ATS invalidate + DTI + AXI concurrent; IDE Gen7 modes.
+
+--------------------------------------------------------------------------------
+CROSS-QUESTIONS (Line 4)
+--------------------------------------------------------------------------------
+
+Q71: uvm_do vs uvm_do_with?
+
+A71:
+uvm_do: create, randomize, send.
+uvm_do_with: inline constraints. Used for locking TLP type to UIO or
+specific addr/length while leaving other fields random.
+
+Q72: Backpressure mechanisms in tests?
+
+A72:
+Lower credit limits, deassert ready on stream slaves, backpressure scenario
+enum, stop_cxs_driver for link-down, longer scoreboard wait loops.
+
+Q73: Flit Mode Gen6/7 effect on TLP verification?
+
+A73:
+TLPs packed into flits; start alignment DW constraints; possible pkt gaps;
+misc flit mode straps; negotiation incomplete TODO for mode 00; rate_max
+constraints require Gen5+ speeds when FM supported.
+
+Q74: Reset with outstanding transactions?
+
+A74:
+Stop CXS/TLP sequences; clear tag pools / predicted queues / scoreboard state
+via reset API; expect drops/timeouts as designed; then re-init credits and
+resume bursts (m_num_hard_resets_done tracking).
+
+Q75: uvm_test vs uvm_sequence?
+
+A75:
+Test: builds env, sets overrides/config, starts top sequence.
+Sequence: stimulus on sequencers. We use base_test + scenario + vseq pattern.
+
+Q76: Coverage closure for corner cases?
+
+A76:
+Functional covergroups (ports active, order-check disable, splitting schemes,
+split CPL order); IMC merge (imc_cov_merge); directed tests for UNR holes;
+COV=1 Makefile builds.
+
+Q77: rand vs randc?
+
+A77:
+rand: independent each randomize (with replacement).
+randc: cyclic permutation before repeat — good for tag/port sweeping.
+
+Q78: Constraints for legal UIO transactions?
+
+A78:
+Directed TLP subclasses: m_tlp_type inside {UIOMRd,UIOMWr} with dist; scenario
+m_num_uio_vcs == NUM_UIO_VCS; tag manager uio mode; IB target AXI.
+
+Q79: solve...before vs if...else constraints?
+
+A79:
+solve before: ordering heuristic for RNG (flit_support before misc_flit_mode).
+if/else: implication of legal combinations. Both used in sceanrio.sv.
+
+Q80: Reset sequences while traffic active?
+
+A80:
+Fork traffic and reset sequences on vsequencer; stop drivers; wait VIP STOP
+with deacthint; drain or flush checkers; reconfigure misc straps; continue
+bursts.
+
+================================================================================
+LINE 5: Order Checking Solution
+================================================================================
+
+Q81: PCIe ordering rules? Why important for Posted?
+
+A81:
+Posted writes must not pass earlier posted writes in ways that break producer-
+consumer (unless RO/IDO allows). Violations → data corruption / stale reads.
+Our IB posted order checker models delivery across AXI, DTI, MSI sinks.
+
+Q82: Strict vs Relaxed Ordering — how supported?
+
+A82:
+Strict: disable_ordering=0 → check_p_p_ordering errors if earlier same
+id_group posted not yet delivered to its dest.
+Relaxed: metadata.ro or route_en.ro_en (also vc_en/tc_en) sets
+disable_ordering=1; checker logs and samples cg_disable_p_p_order_check.
+Under HPA2_IDE_GEN7 scenario forces ro_en==1.
+
+Q83: AXI, DTI, MSI interfaces in HLS Bridge?
+
+A83:
+AXI (HLS ports): main client TLP CXS ports.
+DTI: Data Transfer Interface path (optional KMAX_DTI_SUPPORT).
+MSI: Message Signaled Interrupts via AXI-Stream MSI slave.
+QoS aggregates completion counts from all three (qos_spec.txt).
+
+Q84: Order checking solution architecture?
+
+A84:
+Expected queue ib_p_exp_q fed by predicted delivered port_tr.
+Actual ended packets from AXI CXS / DTI CXS / MSI stream FIFOs trigger
+check_p_p_ordering.
+Delivered-count streams delete N matching entries per port/id_group.
+Debug order disable registers can skip sinks.
+Reset clears queues; check_phase requires balance.
+
+Q85: Ordering across AXI, DTI, MSI?
+
+A85:
+Single expected queue tagged with dest_port, hls_port_num, id_group,
+data_bytes. Actual completion on one sink checks no older same-id_group
+entries remain for other sinks/ports unless RO disabled.
+
+Q86: Data structures for multiple streams?
+
+A86:
+Queue of cdn_pcie_hls_bridge_ib_port_tr_delivered_s; match by dest/port/
+id_group/bytes; ID group from UserControl or DC stream bits [3:1].
+Per-port analysis FIFO arrays for AXI.
+
+Q87: How verify ordering violations?
+
+A87:
+uvm_error when earlier posted undelivered; print_row tables for current vs
+blocking packet; coverage when check disabled; DC mismatch uvm_error if
+count != matching packets.
+
+Q88: Specific Posted rules implemented?
+
+A88:
+Same ID group must respect delivery order across destinations/ports under
+strict mode; MSI matches via payload bytes then checks order; DTI always
+checks (disable_checking 0); AXI respects RO/route flags.
+
+Q89: Relaxed Ordering across traffic classes?
+
+A89:
+route_en.tc_en / vc_en disable ordering checks (treated like relaxed for
+checker). Scenario currently constrains many route bits; Gen7 path enables
+ro_en. Different TC/VC can reorder when those enables are on.
+
+Q90: Ordering challenges with multiple HLS ports?
+
+A90:
+Per-port actual monitors; expected entries carry hls_port_num; same-cycle
+multi-port activity; dbg_dis_per_port_o_chk; splitting schemes change which
+port receives traffic mid-test.
+
+--------------------------------------------------------------------------------
+CROSS-QUESTIONS (Line 5)
+--------------------------------------------------------------------------------
+
+Q91: ID-based vs TC-based ordering?
+
+A91:
+ID-based (IDO): reorder across different requester IDs; same ID ordered.
+TC-based: independent ordering per Traffic Class / VC.
+Checker keys primarily on id_group; tc/vc enables disable strict global check.
+
+Q92: Out-of-order completions in order checker?
+
+A92:
+Order checker focuses on posted; completions use tag scoreboards / OoO SCB.
+Posted expected queue is not free to reorder under strict rules.
+
+Q93: AXI vs DTI vs MSI protocols together?
+
+A93:
+Different client sinks for different traffic classes of service: bulk TLP
+(AXI HLS), DTI path, interrupt messages (MSI). Bridge routes IB posted to
+one of them; QoS counts all.
+
+Q94: Predictor for posted packets?
+
+A94:
+IB: monitor builds expected delivered transactions into order checker.
+OB: merge predictor predicts HAL merge order from multi-port AXI/DTI starts.
+
+Q95: Relaxed Ordering vs ID-based Ordering?
+
+A95:
+RO attribute allows posted to pass certain posted.
+IDO allows reordering between different IDs.
+Both relax strict fabric ordering; checker models RO via disable flag;
+id_group still scopes comparisons.
+
+Q96: Ordering when packets take different paths?
+
+A96:
+That's the core of ib_posted_order_checker — one expected timeline, multiple
+actual path observers, error if a later path retires before earlier different-
+path same-id_group posted is delivered.
+
+Q97: Ordering vs coherency?
+
+A97:
+Ordering: transaction visibility order rules in PCIe.
+Coherency: cache/memory consistency (often CXL/CPU domain). Bridge TB verifies
+PCIe ordering, not full system cache coherency.
+
+Q98: Ordering across interfaces with different latencies?
+
+A98:
+Expected queue + event-driven checks (not cycle budget); DC stream confirms
+drain batches; extended simulation waits under backpressure.
+
+Q99: Posted vs non-posted ordering rules?
+
+A99:
+Posted-posted strongly ordered (unless RO/IDO).
+NP can pass posted in many cases; completions have their own rules vs posted.
+Our dedicated checker emphasizes posted-posted across sinks.
+
+Q100: Handling ordering violations in checker?
+
+A100:
+Emit uvm_error with tables; do not delete incorrectly; continue to find more;
+coverage for intentional disable; fail regression in vManager.
+
+================================================================================
+LINE 6: Regression and Coverage Closure
+================================================================================
+
+Q101: What is vManager and how used?
+
+A101:
+Cadence vManager runs large regressions (multi-config FM/NFM, widths, ports).
+Makefile notes IMC merge because "vManager doesn't merge coverage properly",
+using BRUN_SESSION_DIR run trees.
+
+Q102: Analyze large-scale regression failures?
+
+A102:
+Triage unique signatures/seeds; re-run failing seed with waves; classify TB
+vs RTL vs VIP; check scoreboard vs order-checker messages; look for
+config-specific fails (width/FM); promote fixes + directed tests.
+
+Q103: Achieve 100% functional coverage strategies?
+
+A103:
+Cross configs in regression; covergroups in predictors/order checker/monitor
+hooks; constrained-random weights (pack_max_tlp); directed UIO/split tests;
+IMC merge + UNR refinement excludes; iterate holes.
+
+Q104: Code vs functional coverage?
+
+A104:
+Code: lines/branches/toggles/FSM of RTL.
+Functional: did intended scenarios happen (covergroups/crosses).
+Both needed: code≠spec intent; functional may miss untested RTL.
+
+Q105: Coverage models for 128/256/512/1024?
+
+A105:
+Separate builds/configs per datapath (Makefile 1024dp/fm/...); port width
+parameters change packing/alignment bins; covergroups parameterized by
+NUM_HLS_PORTS; merge per-config then overall.
+
+Q106: Challenging failures you debugged?
+
+A106:
+Example class from this TB: ordering fail only when RO clear but multi-sink
+latency differs; predictor queue not empty due to start/end same-cycle race
+(fixed with wait_for_hash_zero_delay); scoreboard mismatch under backpressure
+quietness timeout — extended waits for BP scenarios.
+
+Q107: Prioritize configurations in regression?
+
+A107:
+Sanity smoke first; then high-use widths/ports; FM Gen7 configs; DTI+MSI
+enabled matrices; IDE configs; overnight full matrix; risk-based on recent
+RTL changes.
+
+Q108: Validate 100% coverage not false?
+
+A108:
+Review bin expressions; exclude only via UNR with comments; check cover
+disable paths sampled intentionally; assert checks_enable during cov runs;
+spot-check waveform for claimed bins.
+
+Q109: Impossible coverage holes?
+
+A109:
+Document as illegal per parameters (e.g., 2DW align unsupported); UNR
+refinement (unr_regression_refine target); constrain so random won't attempt
+illegal; waive with reviewer note.
+
+Q110: Metrics beyond coverage %?
+
+A110:
+Regression pass rate, unique bug find rate, scoreboard error counts, time-to-
+drain, tag exhaustion hits, seed uniqueness, assertion failures, escape bugs
+from full-chip.
+
+--------------------------------------------------------------------------------
+CROSS-QUESTIONS (Line 6)
+--------------------------------------------------------------------------------
+
+Q111: Functional vs assertion coverage?
+
+A111:
+Functional: covergroup bins of scenarios.
+Assertion coverage: how often SVA properties attempted/passed/failed.
+Complementary.
+
+Q112: Merge coverage from multiple runs?
+
+A112:
+Makefile imc_cov_merge: imc merge -initial_model union_all over run_*/cov_work.
+Then reports / UNR refine.
+
+Q113: covergroup, coverpoint, cross?
+
+A113:
+covergroup: container sampled on events.
+coverpoint: bins on an expression.
+cross: combinations of coverpoints (e.g., port × RO disable).
+
+Q114: Cross coverage between config parameters?
+
+A114:
+Regression matrix crosses FM/NFM × width × ports × MSI/DTI; covergroups
+sample route_to × hls_port_num; scenario constraints shape stimulus to hit
+crosses.
+
+Q115: Simulation time vs coverage collection?
+
+A115:
+COV off by default (Makefile); enable COV=1 for closure runs; longer BP
+timeouts when cov enabled (vseq comment doubled for FUNC_COV); don't collect
+full cov on every debug run.
+
+Q116: Regression vs sanity?
+
+A116:
+Sanity: m_sanity_test → 1 burst, 20 TLPs — quick gate.
+Regression: large random + directed suite across configs overnight.
+
+Q117: Coverage with different data widths?
+
+A117:
+Width-specific builds; alignment/packing bins depend on width; HDR2LOG size
+follows width; avoid merging incompatible models incorrectly (IMC type ignore
+config used).
+
+Q118: Code coverage vs toggle coverage?
+
+A118:
+Code often means statement/branch; toggle is bit 0↔1 activity. Toggle finds
+stuck signals; still need functional for protocol intent.
+
+Q119: Assertions for coverage collection?
+
+A119:
+cover property / covergroup sample from SVA events; VIP assertion coverage
+merged with TB functional cov in IMC.
+
+Q120: Coverage closure before tape-out?
+
+A120:
+100% functional goals per config, code cov targets, UNR waivers reviewed,
+no open high-sev bugs, full regression green, full-chip confirmation.
+
+================================================================================
+CROSS-CUTTING QUESTIONS
+================================================================================
+
+Q121: Complete architecture — each component role?
+
+A121:
+See Q1/Q7. Stimulus: vseq→sequencers→drivers. Checking: monitor→predictor→
+scoreboard/order checker. Config: env_config+scenario. DUT: hls_bridge_top.
+Tags: tag_manager. Routing stimulus: cif_tlp_router.
+
+Q122: Configurable for EP/RP, FM/NFM?
+
+A122:
+strap_port_type / KMAX_PORT_TYPE; m_k_flit_mode_support & m_misc_flit_mode;
+dev_top_config policies; rate_max constraints; ifdef feature flags.
+
+Q123: Complexity of multiple interfaces?
+
+A123:
+Typed TLM per protocol; arrayed agents; shared virtual sequencer; common
+reset interface API; QoS/DC unify sideband; one monitor orchestrator.
+
+Q124: Organize test library?
+
+A124:
+base_test + scenario subclasses + directed_*_test in test.sv; sequences in
+vseq and specialized seq files (qos_seq, inv_cpl_seq, axi_reg_...); Makefile
+targets per suite.
+
+Q125: Dual HLS-port environment?
+
+A125:
+NUM_HLS_PORTS-sized env arrays; looped build/connect; merge predictor includes
+all ports (+DTI); per-port scoreboards for IB; splitting scheme coverage.
+
+Q126: Overall verification strategy?
+
+A126:
+Bottom-up: VIP bring-up → directed UIO/smoke → constrained-random P/NP/CPL
+IB/OB → ordering/backpressure/reset → coverage closure across FM/NFM widths
+→ full-chip.
+
+Q127: Balance directed vs CR?
+
+A127:
+CR for broad space; directed for holes, bugs, and spec-mandated scenarios;
+sanity as CI gate.
+
+Q128: Complete enough for tape-out?
+
+A128:
+Coverage goals, regression health, checker completeness (order+SCB+VIP),
+escape analysis, spec traceability (vplan TODOs in tag_manager).
+
+Q129: Error scenario verification?
+
+A129:
+AXI slave error injection knob; CPL timeout tag release; ATS fault force;
+unmapped reg (optional); IDE/ASF error injection parameters in qos_spec;
+inv_cpl sequences.
+
+Q130: PCIe compliance strategy?
+
+A130:
+Rely on VIP protocol checks + HPA TLP legal constraints + bridge-specific
+checkers for routing/ordering/credits; Gen speed / flit mode straps; not a
+full PCI-SIG CTS replacement at unit level.
+
+Q131: Most challenging debug?
+
+A131:
+IB posted order mismatch under mixed AXI/DTI/MSI latencies with RO cleared:
+used expected-queue tables, seed replay, compared UserControl.ro and
+route_en, found predictor/checker disable mismatch; fixed metadata handling
+and added disable coverage.
+
+Q132: Full-chip-only failures?
+
+A132:
+Compare unit vs full-chip config straps; add passive monitors; check clock
+ratios/backpressure differences; capture multi-IP interaction (QoS/MSI);
+promote unit test reproducing stimulus.
+
+Q133: Debug tools?
+
+A133:
+Cadence waves (SimVision/Indago), UVM logs, vManager, IMC coverage, custom
+print_table, Makefile COV/seed knobs.
+
+Q134: Intermittent failures?
+
+A134:
+Save seed; stress with more TLPs; increase verbosity; add scoreboard
+breadcrumbs; check races (same-cycle start/end); disable parallel traffic to
+bisect.
+
+Q135: Failures across multiple protocol interfaces?
+
+A135:
+Timeline-align CXS + stream + AXI-Lite in waves; use common packet IDs/tags/
+data_bytes; order checker tables show which sink retired early.
+
+Q136: Why TLM analysis ports/FIFOs vs direct connections?
+
+A136:
+Decouple monitor timing from checker processing; 1-to-many fanout; avoid
+re-entrancy in monitor callbacks; easier reset flush.
+
+Q137: Reuse across projects?
+
+A137:
+Parameterized packages, factory overrides, VIP-agnostic TLM shapes where
+possible, feature ifdefs, scenario base class.
+
+Q138: Key lessons learned?
+
+A138:
+Feature interaction (RO×multi-sink×BP) needs explicit tests; end-of-test
+drain is as important as runtime checks; coverage disable paths must be
+covered; zero-delay races in predictors are real.
+
+Q139: Spec changes during verification?
+
+A139:
+Update scenario constraints and checkers together; add directed tests for
+new behaviors; keep route_en/RO constraints in sync with design ECO
+(HPA2_IDE_GEN7 RO force).
+
+Q140: Methodologies beyond UVM?
+
+A140:
+SVA/VIP assertions, IMC coverage, formal UNR (jgproject targets), scoreboard
+reference models, constrained-random + directed hybrid, vManager regression.
+
+Q141: Complete UIO Read flow generation→verification?
+
+A141:
+Directed/random UIOMRd → tag alloc (UIO scheme) → CXS drive IB or OB path →
+DUT route → monitors capture → scoreboard data compare → split CPLs tracked
+→ tag release → coverage sample for split/random-order.
+
+Q142: FM vs NFM handling differences in HLS Bridge?
+
+A142:
+Different misc flit mode straps, packing/alignment rules, gap allowance, Gen
+rate requirements, coverage TCL (coverage vs coverage_gen7), CXS flit
+semantics vs classic TLP framing.
+
+Q143: Posted ordering rules — checking implementation?
+
+A143:
+See Q81–Q88: expected queue + per-sink actual + id_group + RO disable.
+
+Q144: Tag management for NP?
+
+A144:
+See Q35: allocate/block/release/LUT/timeout/FLR; static policy per sim.
+
+Q145: Backpressure at HLS interface?
+
+A145:
+Credit limits on CXS; ready low on AXI-Stream sidebands; DUT stalls; TB
+en_backpressure_* and crd_lmt randomization; scoreboards still must drain.
+
+================================================================================
+BEHAVIORAL / CROSS-EXAMINATION
+================================================================================
+
+Q146: Complex failure, no obvious cause?
+
+A146:
+Repro seed → minimal traffic bisect → add order-checker tables → found RO
+metadata cleared but route_en.tc_en set → checker disabled unexpectedly →
+fixed test intent and covered both paths.
+
+Q147: Disagreement with design on expected behavior?
+
+A147:
+Cite spec + waves + checker logs; propose experiment; file bug with seed;
+agree on temporary waiver only with tracked vplan item.
+
+Q148: Prioritize when multiple features develop?
+
+A148:
+Blockers for smoke first; features with highest bug risk (ordering, tags);
+coverage holes near tape-out; parallelize via regression configs.
+
+Q149: Explain complex concept to non-verification engineer?
+
+A149:
+Use producer-consumer posted write analogy for ordering; whiteboard OB vs IB;
+avoid UVM jargon — show one packet timeline across AXI and MSI.
+
+Q150: Unclear/incomplete specification?
+
+A150:
+List assumptions in test comments; ask architects; constrain conservatively;
+add checkers behind enables; update when spec clarifies (TODOs in scenario).
+
+Q151: What would you do differently?
+
+A151:
+Earlier multi-feature interaction matrix; stronger automated log triage;
+complete flit negotiation cases (mode 00 TODO); more scoreboard
+scoreboarding for QoS early.
+
+Q152: Quality vs deadlines?
+
+A152:
+Risk-based testing; keep sanity green; automate regression; directed tests
+for known risks; defer low-risk bins with documented waivers.
+
+Q153: Bug found after "complete"?
+
+A153:
+Root-cause, add directed + coverpoint, assess escape reason, extend
+regression, communicate impact.
+
+Q154: Difficult teammate?
+
+A154:
+Focus on data (waves/seeds), shared debug docs, escalate technically not
+personally, pair on failing tests.
+
+Q155: Stay updated?
+
+A155:
+PCIe/CXL specs, Cadence VIP release notes, UVM Accellera, internal vplan
+reviews, conference papers on flit mode/IDE.
+
+================================================================================
+TECHNICAL SCENARIO QUESTIONS
+================================================================================
+
+Q156: Bug only after 10,000 random iterations?
+
+A156:
+Save seed; run with +UVM_MAX_QUIT_COUNT; add progressive checkers; shrink
+constraints once repro; check rare cross (BP+RO+multi-port); add cover to
+prove hit rate.
+
+Q157: Scoreboard mismatch, design says RTL correct?
+
+A157:
+Prove with independent monitor bytes; review predictor assumptions; check
+VIP config; create minimal directed golden; if TB bug fix TB; if RTL, file
+bug with waveform evidence.
+
+Q158: Add new PCIe feature to UVM env?
+
+A158:
+Extend TLP/constraints → scenario knobs → sequence/driver support →
+monitor/predictor/scoreboard → coverage → directed test → regression config
+→ factory override if VIP class changes.
+
+Q159: Regression too long?
+
+A159:
+Sanity vs nightly tiers; reduce TLP counts where unneeded; parallel vManager
+farm; COV only on closure jobs; prune redundant configs; transactional VIP
+modes.
+
+Q160: Coverage hole unreachable by CR?
+
+A160:
+Directed test / uvm_do_with; force scenario knobs; temporary constraint
+turn-off; if illegal, UNR waive.
+
+Q161: DUT behavior change breaks tests?
+
+A161:
+Diff spec; update reference model/order rules; migrate constraints; keep
+old tests under ifdef until sign-off; communicate TB API changes.
+
+Q162: Coordinate CXS, AXI, MSI scenario?
+
+A162:
+Virtual sequence starts IB posted toward MSI and AXI concurrently; order
+checker expected queue sees both dests; sync with events/barriers on
+vsequencer; verify QoS counts.
+
+Q163: Simulation hanging during reset?
+
+A163:
+Check reset domain forks; sequences waiting on objections; VIP not reaching
+STOP; forever get on empty FIFO without reset flush; objection leakage;
+timeout in m_hpa_timer.
+
+Q164: Corner case needing precise timing?
+
+A164:
+Clock/reset sequences; VIP delay constraints; wait_for_hash_zero_delay;
+drive ready low for N cycles; use misc_if force; directed timing loops in
+sequence.
+
+Q165: HLS Bridge configuration changed?
+
+A165:
+Update parameters_cfg_pkg / straps; regenerate/env_config arrays; adjust
+scenario constraints; rebuild regression matrix; re-merge coverage models.
+
+================================================================================
+ADVANCED UVM / SYSTEMVERILOG / PCIe
+================================================================================
+
+Q166: uvm_event vs uvm_barrier vs uvm_notify?
+
+A166:
+uvm_event: wait/trigger named event.
+uvm_barrier: wait until N processes arrive.
+"uvm_notify" not standard — usually event/callback notification patterns.
+We mostly used TLM FIFOs + reset APIs rather than barriers.
+
+Q167: Multiple sequencers different protocols?
+
+A167:
+Virtual sequencer handles; virtual sequence starts protocol-specific
+sequences on CXS vs AXI-Stream vs AXI-Lite sequencers in fork/join.
+
+Q168: uvm_analysis_port vs uvm_analysis_export?
+
+A168:
+See Q51.
+
+Q169: Reference model in UVM?
+
+A169:
+Predictor components (OB merge predictor) + tag LUT + routing prediction in
+monitor — transaction-level RM fed by analysis, producing expected for SCB.
+
+Q170: uvm_reg vs uvm_reg_field?
+
+A170:
+uvm_reg: register object.
+uvm_reg_field: bit-field inside register. Used via hls_bridge_regmodel in
+order checker for dbg_dis_* mirrored values.
+
+Q171: Register backdoor access?
+
+A171:
+uvm_reg peek/poke / HDL path backdoor vs frontdoor AXI-Lite sequences
+(axi_reg_*_seq). Backdoor for speed/setup; frontdoor for path verification.
+
+Q172: uvm_resource_db vs uvm_config_db?
+
+A172:
+resource_db: low-level typed resource lookup.
+config_db: wrapper with component-context convenience — what we use in
+env_config.
+
+Q173: Phase jumping?
+
+A173:
+Jumping run-time phases (e.g., to reset) — uncommon; must drain carefully.
+We use explicit reset APIs instead of phase jumps.
+
+Q174: uvm_default_table_printer vs custom?
+
+A174:
+Default tabular printer for uvm_object.print(); custom printers format
+domain-specific tables (our print_table for order queue).
+
+Q175: Callbacks in UVM?
+
+A175:
+uvm_callback / VIP callbacks to inject errors or modify transactions without
+subclassing everything; also factory overrides as alternative (our CXS driver
+override).
+
+Q176: rand vs randc?
+
+A176:
+See Q77.
+
+Q177: $cast vs dynamic casting?
+
+A177:
+$cast(tgt, src) safe runtime cast returns 1/0.
+SV class cast similarly; failed hard cast can fatal. Used when retrieving
+base sequence/item handles.
+
+Q178: queue vs dynamic array vs associative array?
+
+A178:
+queue[$]: push/pop ordered (ib_p_exp_q, sorted_queue, tag lists).
+dynamic array[]: sized arrays.
+associative [key]: sparse maps (cpl_seen_map, m_released_tag_by_cpl_TO).
+
+Q179: inside vs dist?
+
+A179:
+inside: membership.
+dist: weighted membership. Both used on m_tlp_type and credit fields.
+
+Q180: solve before vs if/else?
+
+A180:
+See Q79.
+
+Q181: always_comb vs always_latch?
+
+A181:
+always_comb: combinational, infers no latches if complete.
+always_latch: intentional latch. RTL style in delivered/qos modules.
+
+Q182: struct vs union?
+
+A182:
+struct: all members stored.
+union: overlay same bits. Packed structs used for metadata
+(cdn_pcie_hls_ib_p_np_metadata_s).
+
+Q183: logic vs bit?
+
+A183:
+logic: 4-state (X/Z).
+bit: 2-state. TB often uses bit for flags; logic for HDL-facing.
+
+Q184: $random vs $urandom vs $urandom_range?
+
+A184:
+$random: signed 32-bit legacy.
+$urandom: seedable unsigned RNG (SV).
+$urandom_range(max,min): bounded. Prefer urandom in UVM TB.
+
+Q185: @(posedge clk) vs wait(clk)?
+
+A185:
+@(posedge clk): edge event.
+wait(clk): level true (waits until clk!=0) — not equivalent; can miss edges /
+be 1-level sensitive. Use clocking blocks / posedge in TB.
+
+Q186: PCIe Gen5 vs Gen6 vs Gen7?
+
+A186:
+Gen5: 32 GT/s, PAM4, non-flit primarily.
+Gen6: 64 GT/s, Flit Mode architecture, upgraded FEC/CRC.
+Gen7: further rate/flit evolution; this TB has Gen7 IDE defines and
+coverage_gen7.tcl, flit mode straps.
+
+Q187: Flit Mode — when used?
+
+A187:
+Gen6+ links operating in flit mode — fixed-size flits carrying TLPs.
+Enabled when KMAX_FLIT_MODE_SUPPORT; scenario sets misc flit mode 2'b10.
+
+Q188: 10-bit vs 14-bit tags?
+
+A188:
+See Q39.
+
+Q189: AXI vs AXI-Stream?
+
+A189:
+AXI: addressable read/write channels with responses (AXI-Lite reg path).
+AXI-Stream: unidirectional streaming valid/ready/data (DC/QoS/MSI/HDR2LOG).
+
+Q190: CXS vs AXI-Stream?
+
+A190:
+CXS: cache-coherent / PCIe HLS streaming packet protocol with credits, SOP/
+EOP, flits, TLP packing — Denali CXS VIP (denaliCxsTransaction).
+AXI-Stream: simpler streaming; used for sideband in this TB.
+
+Q191: Posted vs Non-Posted?
+
+A191:
+See Q22/Q37.
+
+Q192: PCIe flow control?
+
+A192:
+VC credit-based FC (PH/PD/NPH/NPD/CPLH/CPLD). Bridge TB models limits via
+crd_lmt_if header/payload/cntl per VC; init credits in env_config.
+
+Q193: TLP vs DLLP?
+
+A193:
+See Q31.
+
+Q194: ATS?
+
+A194:
+Address Translation Service: device requests translations from IOMMU; ATC
+cache; invalidations. DTI ATS env + inv requests in scenario when enabled.
+
+Q195: SR-IOV vs MR-IOV?
+
+A195:
+SR-IOV: multiple VFs on one PF in a single root complex.
+MR-IOV: multi-root sharing (blade multi-host). Bridge TB focuses on HLS
+ports/functions rather than implementing full MR-IOV.
+
+================================================================================
+QUICK REPO MAP (for interview prep)
+================================================================================
+env.sv                     - top UVM env, VIP instantiation
+env_config.sv              - config_db programming, widths, BP knobs
+monitor.sv                 - monitors, predictors hooks, scoreboards, split CPL
+ib_posted_order_checker.sv - IB posted ordering AXI/DTI/MSI
+ob_merge_prectictor.sv     - OB multi-port merge predictor
+tag_manager.sv             - NP/UIO tag alloc/release/timeout
+vsequncer.sv / vseq.sv     - virtual sequencer / sequences
+sceanrio.sv                - constrained-random scenario knobs
+test.sv                    - directed UIO tests + factory overrides
+base_test.sv               - factory overrides, base test
+cif_tlp_router.sv          - TLP routing / completion handling
+crd_lmt_if*.sv             - credit limit interfaces
+Makefile                    - COV, IMC merge, FM/width regression configs
+hls_bridge_top.v           - DUT top
+qos_spec.txt / qos*.v      - QoS aggregation behavior
+
+================================================================================
+END OF ANSWERS
+================================================================================
