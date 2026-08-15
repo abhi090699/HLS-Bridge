@@ -349,6 +349,8 @@ class cdn_pcie_hls_bridge_monitor extends uvm_component implements I_cdn_pcie_hl
     end
     // QOS TX FIFO and count arrays
     m_qos_slv_ended_af = new("m_qos_slv_ended_af", this);
+    // QOS counter groups follow DUT hls_bridge_qos layout: NUM_TLP_STREAMS * 4
+    // (must use NUM_TLP_STREAMS, not LBB_NUM_TLP_STREAMS — RTL counter_num is sized by NUM_TLP_STREAMS)
     for (int g = 0; g < (parameters_cfg_pkg::NUM_TLP_STREAMS * 4); g++) begin
       m_qos_expected_count[g] = 0;
       m_qos_observed_count[g] = 0;
@@ -1527,20 +1529,14 @@ endfunction
         m_hls_ib_posted_dti_scoreboard.write_expected_tr(hls_ib_posted_hal_cxs_pkt);
         `uvm_info({l_msg_id, "[QOS_POSTED_DTI]"},$sformatf("Posted TLP to QOS AP via DTI: stream=%0d", hls_ib_posted_hal_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0]),UVM_DEBUG)
         m_hls_ib_posted_qos_ap[0].write(hls_ib_posted_hal_tlp_pkt);
-        // VIP P&RESP + DTI encoder P&REQ and P&RESP
-        m_qos_expected_count[0 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream]++;
-        m_qos_expected_count[2 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream]++;
-        m_qos_expected_count[2 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream]++;
-        `uvm_info("QOS_EXP_DTI",$sformatf("POSTED DTI: stream=%0d P&REQ expected=%0d P&RESP expected=%0d",
-        l_stream, m_qos_expected_count[0 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream],
-        m_qos_expected_count[2 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream]),UVM_DEBUG)
+        // VIP P&RESP only; DTI encoder P&REQ+P&RESP predicted in process_hls_ib_posted_dti_pkt_ended
+        predict_qos_axi_vip(.tlp_type(1'b0), .qos_type(1'b1), .stream(l_stream));
       end
 `endif
       else if(l_route_to == ROUTE_TO_AXI) begin
         m_hls_ib_posted_cxs_scoreboard[l_hls_port_num].write_expected_tr(hls_ib_posted_hal_cxs_pkt);
         m_hls_ib_posted_qos_ap[l_hls_port_num].write(hls_ib_posted_hal_tlp_pkt);
-        m_qos_expected_count[2 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream]++;
-        `uvm_info("QOS_EXP_AXI",$sformatf("POSTED: port=%0d stream=%0d group=%0d expected=%0d",l_hls_port_num, l_stream,2 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream,m_qos_expected_count[2 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream]),UVM_DEBUG)
+        predict_qos_axi_vip(.tlp_type(1'b0), .qos_type(1'b1), .stream(l_stream));
       end 
 
       //--- Send the IB Packet to the Posted Order Checker Component ------
@@ -1596,8 +1592,7 @@ endfunction
 	 m_hls_ib_nonposted_qos_ap[l_hls_port_num].write(hls_ib_nonposted_hal_tlp_pkt);
 	 begin
  		 int l_stream = int'(hls_ib_nonposted_hal_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0]);
- 		 m_qos_expected_count[3 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream]++;
-  		 `uvm_info("QOS_EXP_AXI",$sformatf("NONPOSTED AXI: port=%0d stream=%0d group=%0d expected=%0d", l_hls_port_num, l_stream, 3 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream,m_qos_expected_count[3 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream]),UVM_DEBUG)
+ 		 predict_qos_axi_vip(.tlp_type(1'b1), .qos_type(1'b1), .stream(l_stream));
 	 end
       end
 `ifdef DTI_TB_IN_PASSIVE_MODE
@@ -1607,13 +1602,8 @@ endfunction
 	m_hls_ib_nonposted_qos_ap[0].write(hls_ib_nonposted_hal_tlp_pkt);
 	begin
   		int l_stream = int'(hls_ib_nonposted_hal_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0]);
-  		// VIP NP&RESP + DTI encoder NP&REQ and NP&RESP
-  		m_qos_expected_count[1 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream]++;
-  		m_qos_expected_count[3 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream]++;
-  		m_qos_expected_count[3 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream]++;
-  		`uvm_info("QOS_EXP_DTI",$sformatf("NONPOSTED DTI: stream=%0d NP&REQ expected=%0d NP&RESP expected=%0d",
-  		l_stream, m_qos_expected_count[1 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream],
-  		m_qos_expected_count[3 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream]), UVM_DEBUG)
+  		// VIP NP&RESP only; DTI encoder NP&REQ+NP&RESP predicted in process_hls_ib_nonposted_dti_pkt_ended
+  		predict_qos_axi_vip(.tlp_type(1'b1), .qos_type(1'b1), .stream(l_stream));
 	end
       end
 `endif
@@ -1665,7 +1655,7 @@ endfunction
 	`uvm_info({l_msg_id, "[QOS_COMPL]"}, $sformatf("Completion TLP to QOS AP via AXI: port=%0d stream=%0d",l_hls_port_num, l_hls_port_num[2:0]), UVM_DEBUG)
        m_hls_ib_compl_qos_ap[l_hls_port_num].write(hls_ib_compl_hal_tlp_pkt);
 	begin
-  		int l_group = 1 * parameters_cfg_pkg::NUM_TLP_STREAMS + int'(l_hls_port_num[2:0]);
+  		int l_group = qos_group_idx(1'b1, 1'b0, int'(l_hls_port_num[2:0]));
   	        m_qos_expected_count[l_group]++;
 		`uvm_info("QOS_EXP",$sformatf("COMPL AXI: port=%0d group=%0d expected=%0d",l_hls_port_num, l_group,m_qos_expected_count[l_group]),UVM_DEBUG)
 	end
@@ -1712,6 +1702,13 @@ endfunction
       //- Push packet to scoreboard -------------------------------------------
       m_hls_ib_nonposted_dti_scoreboard.write_received_tr(hls_ib_nonposted_dti_cxs_pkt);
 
+      //- DTI encoder (hls_bridge_qos_dti_pck_enc IS_POSTED=0): each packet end on
+      //- hls_np_rx_dti increments NP&REQ and NP&RESP for the stream.
+      begin
+        int l_stream = int'(hls_ib_nonposted_dti_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0]);
+        predict_qos_dti_np_pck_ended(.stream(l_stream), .msg_id(l_msg_id));
+      end
+
       //- Calling Coverage callbacks -------------------------------------------
       // TODO: Add later
 /* -----\/----- EXCLUDED -----\/-----
@@ -1753,6 +1750,13 @@ endfunction
 
       //- Send to IB Posted Order Checker --------------------------------------
       dti_ib_posted_pkt_ended_ap.write(hls_ib_posted_dti_cxs_pkt);
+
+      //- DTI encoder (hls_bridge_qos_dti_pck_enc IS_POSTED=1): each packet end on
+      //- hls_p_rx_dti increments P&REQ and P&RESP for the stream.
+      begin
+        int l_stream = int'(hls_ib_posted_dti_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0]);
+        predict_qos_dti_p_pck_ended(.stream(l_stream), .msg_id(l_msg_id));
+      end
       
       //- Calling Coverage callbacks -------------------------------------------
       // TODO: Add later
@@ -3381,6 +3385,45 @@ endfunction
     hls_ib_posted_port_tr_ap.write(port_tr); 
 
   endtask : send_to_ib_posted_order_checker
+
+  //----------------------------------------------------------------------------
+  // QOS expected-count helpers (mirror hls_bridge_qos / hls_bridge_qos_dti_pck_enc)
+  // Counter groups: 0=P&REQ, 1=NP&REQ, 2=P&RESP, 3=NP&RESP; each group has NUM_TLP_STREAMS slots.
+  //----------------------------------------------------------------------------
+  function int qos_group_idx(bit tlp_type, bit qos_type, int unsigned stream);
+    int unsigned l_group_base = tlp_type ? (qos_type ? 3 : 1) : (qos_type ? 2 : 0);
+    return l_group_base * parameters_cfg_pkg::NUM_TLP_STREAMS + stream;
+  endfunction : qos_group_idx
+
+  function void predict_qos_axi_vip(bit tlp_type, bit qos_type, int unsigned stream, int unsigned count = 1);
+    int l_group = qos_group_idx(tlp_type, qos_type, stream);
+    m_qos_expected_count[l_group] += count;
+    `uvm_info("QOS_EXP_AXI_VIP", $sformatf(
+      "AXI VIP: tlp_type=%0b qos_type=%0b stream=%0d group=%0d count=%0d expected=%0d",
+      tlp_type, qos_type, stream, l_group, count, m_qos_expected_count[l_group]), UVM_DEBUG)
+  endfunction : predict_qos_axi_vip
+
+  function void predict_qos_dti_np_pck_ended(int unsigned stream, string msg_id = "");
+    int l_np_req_g  = qos_group_idx(1'b1, 1'b0, stream);
+    int l_np_resp_g = qos_group_idx(1'b1, 1'b1, stream);
+    m_qos_expected_count[l_np_req_g]++;
+    m_qos_expected_count[l_np_resp_g]++;
+    `uvm_info("QOS_EXP_DTI_ENC", $sformatf(
+      "NONPOSTED DTI encoder: stream=%0d NP&REQ group=%0d=%0d NP&RESP group=%0d=%0d",
+      stream, l_np_req_g, m_qos_expected_count[l_np_req_g],
+      l_np_resp_g, m_qos_expected_count[l_np_resp_g]), UVM_DEBUG)
+  endfunction : predict_qos_dti_np_pck_ended
+
+  function void predict_qos_dti_p_pck_ended(int unsigned stream, string msg_id = "");
+    int l_p_req_g  = qos_group_idx(1'b0, 1'b0, stream);
+    int l_p_resp_g = qos_group_idx(1'b0, 1'b1, stream);
+    m_qos_expected_count[l_p_req_g]++;
+    m_qos_expected_count[l_p_resp_g]++;
+    `uvm_info("QOS_EXP_DTI_ENC", $sformatf(
+      "POSTED DTI encoder: stream=%0d P&REQ group=%0d=%0d P&RESP group=%0d=%0d",
+      stream, l_p_req_g, m_qos_expected_count[l_p_req_g],
+      l_p_resp_g, m_qos_expected_count[l_p_resp_g]), UVM_DEBUG)
+  endfunction : predict_qos_dti_p_pck_ended
 
   //----------------------------------------------------------------------------
   // Function:    process_tlp_qos_tx
