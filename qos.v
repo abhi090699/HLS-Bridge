@@ -2,6 +2,10 @@ module hls_bridge_qos #(
   /////////////////////////////////////////////////////////////////////////////
   //                                Parameters                               //
   /////////////////////////////////////////////////////////////////////////////
+  /*BSF:doc=Maximum data path width supported in the design;*/
+  parameter KMAX_DATAPATH_WD               = 1024,
+  /*BSF:doc=DTI HLS CNTL width (calculated on top);*/
+  parameter HLS_DTI_CNTL_WD                = 1024,
   /*BSF:doc=Maximum number of HLS PORTS on AXI-Bridge side;*/
    parameter NUM_HLS_PORTS                 = 1,
   /*BSF:doc=Support for MSI IF;*/
@@ -9,12 +13,21 @@ module hls_bridge_qos #(
   /*BSF:doc=Support for DTI module;*/
    parameter KMAX_DTI_SUPPORT              = 1,
   /*BSF:doc=Number of suported ID streams;*/
-   parameter NUM_TLP_STREAMS               = 8,
+   parameter LBB_NUM_TLP_STREAMS           = 8,
   /*BSF:doc=MSI QOS data width Stream ID;*/
-   parameter MSI_QOS_DATA_WIDTH            = 3, 
+   parameter MSI_QOS_DATA_WIDTH            = 3,
 
    parameter TLP_QOS_TDATA_WIDTH           = 24,
    parameter TLP_QOS_TDATA_CHK_WIDTH       = (TLP_QOS_TDATA_WIDTH +7)/8,
+
+   /*BSF:doc=Maximum number of TLPs to support per clock;*/
+   parameter KMAX_NUM_TLPS_PER_CLK         = 4,
+
+   /*BSF:doc=HLS WD;*/
+   parameter HLS_METADATA_WD               = 10,
+
+   /*BSF:doc=Start pointer alignment: 2: 64-bit (2 DWords), 4: 128-bit (4 DWords);*/
+   parameter HLS_DW_ALIGNMENT              = 2,
    //------------------------------------------------------------------------------
    //ASF
    //------------------------------------------------------------------------------
@@ -40,11 +53,10 @@ module hls_bridge_qos #(
    //// base NODE for ctag
    //localparam QOS_ASF_NODE_ID_BASE  = ASF_NODE_ID_WIDTH +,
 
-   localparam QOS_NUM_IF                    = NUM_HLS_PORTS +KMAX_DTI_SUPPORT +KMAX_MSI_IF_SUPPORT,
-   localparam DTI_POINTER                   = NUM_HLS_PORTS,
-   localparam MSI_POINTER                   = NUM_HLS_PORTS +KMAX_DTI_SUPPORT,
+   localparam QOS_NUM_IF                    = NUM_HLS_PORTS +KMAX_MSI_IF_SUPPORT,
+   localparam MSI_POINTER                   = NUM_HLS_PORTS ,
 
-   localparam QOS_ASF_EVENT_VALID_WIDTH        = QOS_NUM_IF,
+   localparam QOS_ASF_EVENT_VALID_WIDTH        = (QOS_NUM_IF),   // DTI is excluded
    localparam QOS_ASF_EVENT_TYPE_WIDTH         = QOS_NUM_IF*ASF_EVENT_TYPE_WIDTH      ,
    localparam QOS_ASF_EVENT_COUNT_WIDTH        = QOS_NUM_IF*ASF_EVENT_COUNT_WIDTH     ,
    localparam QOS_ASF_NODE_ID_WIDTH            = QOS_NUM_IF*ASF_NODE_ID_WIDTH         ,
@@ -65,10 +77,9 @@ module hls_bridge_qos #(
    input wire [NUM_HLS_PORTS-1:0]                            axi_qos_rx_tvalid,
   /*BSF:doc=
     # [0+:13] - COUNT one count indicates that all data  or requests or responses associated with a single tlp from core side has been transferred/received
-    # [13+:1] - QOS_TYPE 0: Request 1: Response.
-    # [14+:1] - TLP_TYPE 0: Indicates that the count is for posted TLP. 1: Indicates that the count is for nonposted TLP. Correct transaction type needs to be detected from TLP. DMWR is a AXI write but a nonposted
-    # [15+:3] - TLP_STREAM -stream selection posible configs: 1-8. This is field form HLS metadata.
-    # [18+:6] - Dummy bits to fill IF.
+    # [13+:1] - TLP_TYPE 0: Indicates that the count is for posted TLP. 1: Indicates that the count is for nonposted TLP. Correct transaction type needs to be detected from TLP. DMWR is a AXI write but a nonposted
+    # [14+:3] - TLP_STREAM -stream selection posible configs: 1-8. This is field form HLS metadata.
+    # [17+:7] - Dummy bits to fill IF.
   ;*/
    input wire [NUM_HLS_PORTS*TLP_QOS_TDATA_WIDTH-1:0]        axi_qos_rx_tdata,
    // ------------------------------ Parity
@@ -82,24 +93,14 @@ module hls_bridge_qos #(
   // DTI RX interface
   //------------------------------------------------------------------------------
   /*BSF_IF:dti_qos_rx_if,core_clk,core_rst_n,ipio=0,
-    dis=DTI QOS RX interface,
-    doc= Reduced AXI-Stream interface for handling TL buffer control from DTI side,
+    dis=AXI HLS RX interface,
+    doc= CNLT for Posdted and NonPosted DTI interface,
   ;*/
-  //BSF:doc= valid signla for info data;
-   input wire                                           dti_qos_rx_tvalid,
-  /*BSF:doc=
-    # [0+:13] - COUNT one count indicates that all data  or requests or responses associated with a single tlp from core side has been transferred/received
-    # [13+:1] - QOS_TYPE 0: Request 1: Response.
-    # [14+:1] - TLP_TYPE 0: Indicates that the count is for posted TLP. 1: Indicates that the count is for nonposted TLP. Correct transaction type needs to be detected from TLP. DMWR is a AXI write but a nonposted
-    # [15+:3] - TLP_STREAMS  stream selection posible configs: 1-8. This is field form HLS metadata.
-    # [18+:6] - Dummy bits to fill IF.
-  ;*/
-   input wire [TLP_QOS_TDATA_WIDTH-1:0]                 dti_qos_rx_tdata,
-   // ------------------------------ Parity
-   /*BSF:doc=Valid parity;*/
-   input wire                                           dti_qos_rx_tvalid_chk,
-   /*BSF:doc=Data parity;*/
-   input wire [TLP_QOS_TDATA_CHK_WIDTH-1:0]             dti_qos_rx_tdata_chk,
+    input wire                                         hls_p_rx_dti_valid,
+    input wire [HLS_DTI_CNTL_WD-1:0]                   hls_p_rx_dti_cntl,
+
+    input wire                                         hls_np_rx_dti_valid,
+    input wire [HLS_DTI_CNTL_WD-1:0]                   hls_np_rx_dti_cntl,
   //BSF_IF_END:dti_qos_rx_if;
 
   //------------------------------------------------------------------------------
@@ -113,7 +114,6 @@ module hls_bridge_qos #(
   input wire                                              msi_qos_rx_valid,
   /*BSF:doc=
     # [0+:3] - TLP_STREAMS  stream selection posible configs: 1-8. This is field form HLS metadata.
-    # [3+:1] - QOS_TYPE 0: Request 1: Response.
   ;*/
   input wire [MSI_QOS_DATA_WIDTH-1:0]                     msi_qos_rx_data,
   //bsf:doc=valid check for QOS count block;
@@ -133,10 +133,9 @@ module hls_bridge_qos #(
    output wire                                                tlp_qos_tx_tvalid,
   /*BSF:doc=
     # [0+:13] - COUNT one count indicates that all data  or requests or responses associated with a single tlp from core side has been transferred/received
-    # [13+:1] - QOS_TYPE  0: outstanding completion count informaiton. One Count indicating when *all* BRESP or RRESP is received for one TLP request from protocol side. 1: pipeline transfer count information. One Count indicates when all related AW*+W* is transferred out to AXI interface. or when AR* request is transferred out.
-    # [14+:1] - TLP_TYPE  0: Indicates that the count is for posted packets. 1: Indicates that the count is for NP Tlp. Correct transaction type needs to be detected from TLP. DMWR is a AXI write but a nonposted
-    # [15+:3] - TLP_STREAMS stream selection posible configs: 1,2,4,8. This is field form HLS metadata.
-    # [18+:6] - Dummy bits to fill IF.
+    # [13+:1] - TLP_TYPE  0: Indicates that the count is for posted packets. 1: Indicates that the count is for NP Tlp. Correct transaction type needs to be detected from TLP. DMWR is a AXI write but a nonposted
+    # [14+:3] - TLP_STREAMS stream selection posible configs: 1,2,4,8. This is field form HLS metadata.
+    # [17+:7] - Dummy bits to fill IF.
   ;*/
    output wire [TLP_QOS_TDATA_WIDTH-1:0]                      tlp_qos_tx_tdata,
    // ------------------------------ Parity
@@ -183,18 +182,17 @@ module hls_bridge_qos #(
    output [QOS_ASF_EVENT_DIAG_FIELD_WIDTH-1:0]  asf_event__diag_field_qos_tdata
    /*BSF_IF_END:asf_status_and_diag_data;*/
   );
-  localparam DATA_SIZE                  = 13;
-  localparam NUM_TLP_STREAMS_BIT        = $clog2(NUM_TLP_STREAMS);
+  localparam DATA_SIZE                   = 13;
+  localparam LBB_NUM_TLP_STREAMS_BIT     = $clog2(LBB_NUM_TLP_STREAMS);
 
-  localparam NUM_TLP_STREAMS_MAX        = 8;
-  localparam NUM_TLP_STREAMS_MAX_BIT    = $clog2(NUM_TLP_STREAMS_MAX);
+  localparam LBB_NUM_TLP_STREAMS_MAX     = 8;
+  localparam LBB_NUM_TLP_STREAMS_MAX_BIT = $clog2(LBB_NUM_TLP_STREAMS_MAX);
 
-  localparam COUNT_NUMBER               = NUM_TLP_STREAMS*4;
-  localparam COUNT_NUMBER_BIT_SIZE      = $clog2(COUNT_NUMBER);
+  localparam COUNT_NUMBER                = LBB_NUM_TLP_STREAMS*2;
+  localparam COUNT_NUMBER_BIT_SIZE       = $clog2(COUNT_NUMBER);
 
   wire [NUM_HLS_PORTS-1:0]                      axi_valid_rx_tlp_type;
-  wire [NUM_HLS_PORTS-1:0]                      axi_valid_rx_req_type;
-  wire [NUM_HLS_PORTS*NUM_TLP_STREAMS_MAX_BIT-1:0]   axi_valid_rx_tlp_stream;
+  wire [NUM_HLS_PORTS*LBB_NUM_TLP_STREAMS_MAX_BIT-1:0] axi_valid_rx_tlp_stream;
 
   wire [TLP_QOS_TDATA_WIDTH-1:0]                qos_data_tab       [QOS_NUM_IF-1:0];
 //  wire [TLP_QOS_TDATA_WIDTH*QOS_NUM_IF-1:0]     qos_data_w;
@@ -207,6 +205,8 @@ module hls_bridge_qos #(
   wire [TLP_QOS_TDATA_CHK_WIDTH-1:0]            output_count_tab_chk [COUNT_NUMBER-1:0];
 
   wire [31:0]                                   data_reg_chk;
+
+  wire  [KMAX_NUM_TLPS_PER_CLK:0]               dti_counter_en_w [COUNT_NUMBER-1:0];
 
   reg                                           valid_reg;
   reg [COUNT_NUMBER-1:0]                        clear_count;
@@ -222,21 +222,20 @@ module hls_bridge_qos #(
   reg [COUNT_NUMBER_BIT_SIZE-1:0]               rr_counter;
   reg [QOS_NUM_IF-1:0]                          counter_en [COUNT_NUMBER-1:0];
 
-  reg [NUM_TLP_STREAMS_MAX-1:0]                 qos_stream_en_axi [NUM_HLS_PORTS-1:0];
+  reg [LBB_NUM_TLP_STREAMS_MAX-1:0]             qos_stream_en_axi [NUM_HLS_PORTS-1:0];
   reg [COUNT_NUMBER-1:0]                        axi_num_en        [NUM_HLS_PORTS-1:0];
 
   genvar gv_x,gv_y;
   generate
   for (gv_x=0 ; gv_x<NUM_HLS_PORTS ; gv_x=gv_x+1) begin : g_axi_qos_en
     assign axi_valid_rx_tlp_type   [gv_x*1  +:1]  = (axi_qos_rx_tvalid[gv_x] == 1'b1) ? axi_qos_rx_tdata [gv_x*TLP_QOS_TDATA_WIDTH+13 +:1] : 1'b0;
-    assign axi_valid_rx_req_type   [gv_x*1  +:1]  = (axi_qos_rx_tvalid[gv_x] == 1'b1) ? axi_qos_rx_tdata [gv_x*TLP_QOS_TDATA_WIDTH+14 +:1] : 1'b0;
-    assign axi_valid_rx_tlp_stream [gv_x*3  +:3]  = (axi_qos_rx_tvalid[gv_x] == 1'b1) ? axi_qos_rx_tdata [gv_x*TLP_QOS_TDATA_WIDTH+15 +:3] : 3'b000;
+    assign axi_valid_rx_tlp_stream [gv_x*3  +:3]  = (axi_qos_rx_tvalid[gv_x] == 1'b1) ? axi_qos_rx_tdata [gv_x*TLP_QOS_TDATA_WIDTH+14 +:3] : 3'b000;
 
     // Decode the 3-bit stream ID from AXI QoS tdata[17:15] into a one-hot
     // 8-bit vector (qos_stream_en_axi). Zero when the port is not valid.
     always @(*) begin : axi_stream_en_decode
       if (axi_qos_rx_tvalid[gv_x]) begin
-        case (axi_valid_rx_tlp_stream[gv_x*NUM_TLP_STREAMS_MAX_BIT +: NUM_TLP_STREAMS_MAX_BIT])
+        case (axi_valid_rx_tlp_stream[gv_x*LBB_NUM_TLP_STREAMS_MAX_BIT +: LBB_NUM_TLP_STREAMS_MAX_BIT])
           3'b000 : qos_stream_en_axi[gv_x] = 8'b00000001;
           3'b001 : qos_stream_en_axi[gv_x] = 8'b00000010;
           3'b010 : qos_stream_en_axi[gv_x] = 8'b00000100;
@@ -251,23 +250,19 @@ module hls_bridge_qos #(
         qos_stream_en_axi[gv_x] = 8'h00;
     end
 
-    // Map the one-hot stream enable and TLP type/class bits into the correct
-    // counter group slot. The 4*NUM_TLP_STREAMS enable bus is laid out as
-    // {NP&RESP, P&RESP, NP&REQ, P&REQ}, each group NUM_TLP_STREAMS wide.
-    // tlp_type[13]: 0=Request 1=Response  |  req_type[14]: 0=Posted 1=Non-Posted
+    // Map the one-hot stream enable and TLP type bit into the correct
+    // counter group slot. The 2*LBB_NUM_TLP_STREAMS enable bus is laid out as
+    // {NP, P}, each group LBB_NUM_TLP_STREAMS wide.
+    // tlp_type[13]: 0=Posted 1=Non-Posted
     always @(*) begin : axi_counter_en_encode
       if (axi_qos_rx_tvalid[gv_x]) begin
-        if      (!axi_valid_rx_tlp_type[gv_x] &&  !axi_valid_rx_req_type[gv_x])
-          axi_num_en[gv_x] = {{3*NUM_TLP_STREAMS{1'b0}},qos_stream_en_axi[gv_x][NUM_TLP_STREAMS-1:0]};
-        else if (axi_valid_rx_tlp_type[gv_x] && !axi_valid_rx_req_type[gv_x])
-          axi_num_en[gv_x] = {{2*NUM_TLP_STREAMS{1'b0}},qos_stream_en_axi[gv_x][NUM_TLP_STREAMS-1:0],{NUM_TLP_STREAMS{1'b0}}};
-        else if (!axi_valid_rx_tlp_type[gv_x] && axi_valid_rx_req_type[gv_x])
-          axi_num_en[gv_x] = {{NUM_TLP_STREAMS{1'b0}},qos_stream_en_axi[gv_x][NUM_TLP_STREAMS-1:0],{2*NUM_TLP_STREAMS{1'b0}}};
-        else
-          axi_num_en[gv_x] = {qos_stream_en_axi[gv_x][NUM_TLP_STREAMS-1:0],{3*NUM_TLP_STREAMS{1'b0}}};
+        if (!axi_valid_rx_tlp_type[gv_x])   // Posted
+          axi_num_en[gv_x] = {{LBB_NUM_TLP_STREAMS{1'b0}},qos_stream_en_axi[gv_x][LBB_NUM_TLP_STREAMS-1:0]};
+        else                                // Non-Posted
+          axi_num_en[gv_x] = {qos_stream_en_axi[gv_x][LBB_NUM_TLP_STREAMS-1:0],{LBB_NUM_TLP_STREAMS{1'b0}}};
       end
-      else 
-        axi_num_en[gv_x] = {4*NUM_TLP_STREAMS{1'b0}};
+      else
+        axi_num_en[gv_x] = {2*LBB_NUM_TLP_STREAMS{1'b0}};
     end
 
     assign qos_counter_en_tab [gv_x] = axi_num_en[gv_x];
@@ -290,75 +285,78 @@ module hls_bridge_qos #(
   end // NUM_HLS_PORTS
 
   if (KMAX_DTI_SUPPORT) begin : g_dti_qos_en
-    wire                                          dti_valid_rx_tlp_type;
-    wire                                          dti_valid_rx_req_type;
-    wire [NUM_TLP_STREAMS_MAX_BIT-1:0]            dti_valid_rx_tlp_stream;
-    reg  [NUM_TLP_STREAMS_MAX-1:0]                qos_stream_en_dti;
-    reg  [COUNT_NUMBER-1:0]                       dti_num_en;
 
-    assign dti_valid_rx_tlp_type   = (dti_qos_rx_tvalid == 1'b1) ? dti_qos_rx_tdata [13 +:1] : 1'b0;
-    assign dti_valid_rx_req_type   = (dti_qos_rx_tvalid == 1'b1) ? dti_qos_rx_tdata [14 +:1] : 1'b0;
-    assign dti_valid_rx_tlp_stream = (dti_qos_rx_tvalid == 1'b1) ? dti_qos_rx_tdata [15 +:3] : 3'b000;
+    // Per-slot counter-group enables from Posted DTI path (flat)
+    // Layout: [slot*(COUNT_NUMBER) +: COUNT_NUMBER] for slot 0..KMAX_NUM_TLPS_PER_CLK
+    wire [(KMAX_NUM_TLPS_PER_CLK+1)*COUNT_NUMBER-1:0] p_dti_num_en_flat;
+    wire [(KMAX_NUM_TLPS_PER_CLK+1)*COUNT_NUMBER-1:0] np_dti_num_en_flat;
+    reg [KMAX_NUM_TLPS_PER_CLK:0] dti_counter_en_2d [COUNT_NUMBER-1:0];
 
-    // Decode the 3-bit stream ID from DTI QoS tdata[17:15] into a one-hot
-    // 8-bit vector (qos_stream_en_dti). Zero when the DTI port is not valid.
-    always @(*) begin : dti_stream_en_decode
-      if (dti_qos_rx_tvalid) begin
-        case (dti_valid_rx_tlp_stream)
-          3'b000 : qos_stream_en_dti = 8'b00000001;
-          3'b001 : qos_stream_en_dti = 8'b00000010;
-          3'b010 : qos_stream_en_dti = 8'b00000100;
-          3'b011 : qos_stream_en_dti = 8'b00001000;
-          3'b100 : qos_stream_en_dti = 8'b00010000;
-          3'b101 : qos_stream_en_dti = 8'b00100000;
-          3'b110 : qos_stream_en_dti = 8'b01000000;
-          3'b111 : qos_stream_en_dti = 8'b10000000;
-        endcase
-      end
-      else
-        qos_stream_en_dti = 8'h00;
+    // ── Posted path: ──────────────────────────────────────────────────────
+    hls_bridge_qos_dti_pck_enc #(
+      .KMAX_NUM_TLPS_PER_CLK  (KMAX_NUM_TLPS_PER_CLK),
+      .HLS_DTI_CNTL_WD         (HLS_DTI_CNTL_WD),
+      .KMAX_DATAPATH_WD        (KMAX_DATAPATH_WD),
+      .HLS_DW_ALIGNMENT        (HLS_DW_ALIGNMENT),
+      .HLS_METADATA_WD         (HLS_METADATA_WD),
+      .LBB_NUM_TLP_STREAMS     (LBB_NUM_TLP_STREAMS),
+      .COUNT_NUMBER            (COUNT_NUMBER),
+      .IS_POSTED               (1)
+    ) u_qos_dti_p (
+      .core_clk         (core_clk),
+      .core_rst_n       (core_rst_n),
+      .hls_rx_dti_valid (hls_p_rx_dti_valid),
+      .hls_rx_dti_cntl  (hls_p_rx_dti_cntl),
+      .dti_num_en_out   (p_dti_num_en_flat)
+    );
+
+    `HLSB_WIDE_TO_2D(p_dti_num_en_arr, p_dti_num_en_flat, gen_p_num_recon,
+                     KMAX_NUM_TLPS_PER_CLK+1, COUNT_NUMBER)
+
+    // ── Non-Posted path ───────────────────────────────────────────────────
+    hls_bridge_qos_dti_pck_enc #(
+      .KMAX_NUM_TLPS_PER_CLK  (KMAX_NUM_TLPS_PER_CLK),
+      .HLS_DTI_CNTL_WD         (HLS_DTI_CNTL_WD),
+      .KMAX_DATAPATH_WD        (KMAX_DATAPATH_WD),
+      .HLS_DW_ALIGNMENT        (HLS_DW_ALIGNMENT),
+      .HLS_METADATA_WD         (HLS_METADATA_WD),
+      .LBB_NUM_TLP_STREAMS     (LBB_NUM_TLP_STREAMS),
+      .COUNT_NUMBER            (COUNT_NUMBER),
+      .IS_POSTED               (0)
+    ) u_qos_dti_np (
+      .core_clk         (core_clk),
+      .core_rst_n       (core_rst_n),
+      .hls_rx_dti_valid (hls_np_rx_dti_valid),
+      .hls_rx_dti_cntl  (hls_np_rx_dti_cntl),
+      .dti_num_en_out   (np_dti_num_en_flat)
+    );
+
+    `HLSB_WIDE_TO_2D(np_dti_num_en_arr, np_dti_num_en_flat, gen_np_num_recon,
+                     KMAX_NUM_TLPS_PER_CLK+1, COUNT_NUMBER)
+
+    // ── Transpose + OR: [slot][count] -> [count][slot], P | NP ───────────
+    always @(*) begin : dti_counter_en_transpose
+      integer i, j;
+      for (j = 0; j <= KMAX_NUM_TLPS_PER_CLK; j = j + 1)
+        for (i = 0; i < COUNT_NUMBER; i = i + 1)
+          dti_counter_en_2d[i][j] = p_dti_num_en_arr[j][i] | np_dti_num_en_arr[j][i];
     end
 
-    // Same counter-group encoding as the AXI path but for the DTI interface.
-    // The 4*NUM_TLP_STREAMS enable bus is {NP&RESP, P&RESP, NP&REQ, P&REQ}.
-    always @(*) begin : dti_counter_en_encode
-      if (dti_qos_rx_tvalid) begin
-        if (!dti_valid_rx_tlp_type  && !dti_valid_rx_req_type)
-          dti_num_en = {{3*NUM_TLP_STREAMS{1'b0}},qos_stream_en_dti[NUM_TLP_STREAMS-1:0]};
-        else if (dti_valid_rx_tlp_type && !dti_valid_rx_req_type)
-          dti_num_en = {{2*NUM_TLP_STREAMS{1'b0}},qos_stream_en_dti[NUM_TLP_STREAMS-1:0],{NUM_TLP_STREAMS{1'b0}}};
-        else if (!dti_valid_rx_tlp_type  && dti_valid_rx_req_type)
-          dti_num_en = {{NUM_TLP_STREAMS{1'b0}},qos_stream_en_dti[NUM_TLP_STREAMS-1:0],{2*NUM_TLP_STREAMS{1'b0}}};
-        else
-          dti_num_en = {qos_stream_en_dti[NUM_TLP_STREAMS-1:0],{3*NUM_TLP_STREAMS{1'b0}}};
-      end
-      else 
-        dti_num_en = {4*NUM_TLP_STREAMS{1'b0}};
-    end
+    for (gv_x = 0; gv_x < COUNT_NUMBER; gv_x = gv_x + 1)
+      assign dti_counter_en_w[gv_x] = dti_counter_en_2d[gv_x];
 
-    assign qos_counter_en_tab[DTI_POINTER] = dti_num_en;
-    assign qos_valid         [DTI_POINTER] = dti_qos_rx_tvalid;
-    assign qos_data_tab      [DTI_POINTER] = dti_qos_rx_tvalid ? dti_qos_rx_tdata : {TLP_QOS_TDATA_WIDTH{1'b0}};
-    if (ASF_SUPPORT >1) begin : g_dti_asf_on_with_msi
-      assign qos_valid_chk   [DTI_POINTER] = dti_qos_rx_tvalid_chk;
-      assign qos_data_chk_tab[DTI_POINTER] = dti_qos_rx_tvalid ? dti_qos_rx_tdata_chk : {TLP_QOS_TDATA_CHK_WIDTH{1'b1}};
-    end
-    else begin : g_dti_asf_off_with_msi
-      assign qos_valid_chk   [DTI_POINTER] = 1'b0; 
-      assign qos_data_chk_tab[DTI_POINTER] = {TLP_QOS_TDATA_CHK_WIDTH{1'b0}};
-    end 
   end // KMAX_DTI_SUPPORT
+  else begin
+    for (gv_x = 0; gv_x < COUNT_NUMBER; gv_x = gv_x + 1)
+      assign dti_counter_en_w[gv_x] = {KMAX_NUM_TLPS_PER_CLK+1{1'b0}};
+  end
 
   if (KMAX_MSI_IF_SUPPORT) begin : g_msi_qos_en
-    //wire                                          msi_valid_rx_req_type;
-    reg  [NUM_TLP_STREAMS_MAX-1:0]                qos_stream_en_msi;
+    reg  [LBB_NUM_TLP_STREAMS_MAX-1:0]            qos_stream_en_msi;
     reg  [COUNT_NUMBER-1:0]                       msi_num_en;
 
-    //assign msi_valid_rx_req_type   = (msi_qos_rx_valid == 1'b1) ? msi_qos_rx_data [3 +:1] : 1'b0;
-    //assign msi_valid_rx_tlp_stream = (msi_qos_rx_valid == 1'b1) ? msi_qos_rx_data [0 +:3] : 3'b000;
-
-    // Decode the 3-bit stream ID from MSI QoS data[3:0] into a one-hot
-    // 8-bit vector (qos_stream_en_msi). Zero when the DTI port is not valid.
+    // Decode the 3-bit stream ID from MSI QoS data[2:0] into a one-hot
+    // 8-bit vector (qos_stream_en_msi). Zero when the MSI port is not valid.
     always @(*) begin : msi_stream_en_decode
       if (msi_qos_rx_valid) begin
         case (msi_qos_rx_data[0 +:3])
@@ -376,19 +374,13 @@ module hls_bridge_qos #(
         qos_stream_en_msi = 8'h00;
     end
     // Same counter-group encoding as the AXI path but for the MSI interface.
-    // The 4*NUM_TLP_STREAMS enable bus is {NP&RESP, P&RESP, NP&REQ, P&REQ}
-    // For MSI each valid is req & resp.
+    // The 2*LBB_NUM_TLP_STREAMS enable bus is {NP, P}, each LBB_NUM_TLP_STREAMS wide.
+    // MSI delivery is a Posted memory write, so it always maps to the P group.
     always @(*) begin : msi_counter_en_encode
-      if (msi_qos_rx_valid) begin
-        msi_num_en = {{NUM_TLP_STREAMS{1'b0}},qos_stream_en_msi[NUM_TLP_STREAMS-1:0],
-                      {NUM_TLP_STREAMS{1'b0}},qos_stream_en_msi[NUM_TLP_STREAMS-1:0]};
-        //if (!msi_valid_rx_req_type)
-        //  msi_num_en = {{3*NUM_TLP_STREAMS{1'b0}},qos_stream_en_msi[NUM_TLP_STREAMS-1:0]};
-        //else
-        //  msi_num_en = {{NUM_TLP_STREAMS{1'b0}},qos_stream_en_msi[NUM_TLP_STREAMS-1:0],{2*NUM_TLP_STREAMS{1'b0}}};
-      end
-      else 
-        msi_num_en = {4*NUM_TLP_STREAMS{1'b0}};
+      if (msi_qos_rx_valid)
+        msi_num_en = {{LBB_NUM_TLP_STREAMS{1'b0}},qos_stream_en_msi[LBB_NUM_TLP_STREAMS-1:0]};
+      else
+        msi_num_en = {2*LBB_NUM_TLP_STREAMS{1'b0}};
     end
 
     assign qos_counter_en_tab[MSI_POINTER] = msi_num_en;
@@ -446,15 +438,23 @@ module hls_bridge_qos #(
      .BUS_WIDTH                      (TLP_QOS_TDATA_WIDTH),
      .DATA_SIZE                      (DATA_SIZE),
      .NUM_IF                         (QOS_NUM_IF),
+     .KMAX_NUM_TLPS_PER_CLK          (KMAX_NUM_TLPS_PER_CLK),
+     .COUNT_NUMBER                   (COUNT_NUMBER),
+     .LBB_NUM_TLP_STREAMS            (LBB_NUM_TLP_STREAMS),
      .ASF_SUPPORT                    (ASF_SUPPORT)
     )
-      i_hls_bridge_qos_counter
+      u_hls_bridge_qos_counter
     (
      .core_clk                       (core_clk),//input
      .core_rst_n                     (core_rst_n),//input
+
      .enable                         (counter_en[gv_y]),
      .clear                          (clear_count[gv_y]),
+
+     .counter_num                    (gv_y),
+
      .data                           (qos_data_w),
+     .dti_en                         (dti_counter_en_w[gv_y]),
      .output_count                   (output_count_tab[gv_y]),
      .output_count_chk               (output_count_tab_chk[gv_y])
     );
@@ -478,7 +478,7 @@ module hls_bridge_qos #(
     if (output_count_tab[rr_counter][DATA_SIZE-1:0]!={DATA_SIZE{1'b0}}) begin
       data_reg  = output_count_tab [rr_counter];
       valid_reg = 1'b1;
-      clear_count  = {{(COUNT_NUMBER-1){1'b0}},1'b1} <<< rr_counter;
+      clear_count  = {{(COUNT_NUMBER-1){1'b0}},1'b1} << rr_counter;
       data_chk_reg = output_count_tab_chk[rr_counter];
     end
     else begin
@@ -493,8 +493,8 @@ module hls_bridge_qos #(
     if (core_rst_n == 1'b0) begin
       tx_data_reg  <= {TLP_QOS_TDATA_WIDTH{1'b0}};
       tx_valid_reg <= 1'b0;
-      tx_data_chk_reg <= {TLP_QOS_TDATA_CHK_WIDTH{1'b0}};
-      tx_valid_chk_reg<= 1'b0;
+      tx_data_chk_reg <= {TLP_QOS_TDATA_CHK_WIDTH{1'b1}};
+      tx_valid_chk_reg<= 1'b1;
     end
     else begin
       tx_data_reg  <= data_reg;
@@ -544,7 +544,7 @@ module hls_bridge_qos #(
         ) i_asf_par_052_qos_hls_tx_tvalid (
          .clk                                  (core_clk),                 // input
          .rst_n                                (core_rst_n),               // input
-         .chk__data_block_valid_i              (1'b1),
+         .chk__data_block_valid_i              (qos_valid[gv_y]),
          .chk__data_i                          ({31'd0  ,qos_valid[gv_y]}),
          .chk__datachk_i                       ({3'b111 ,qos_valid_chk[gv_y]}),
          .chk__parity_error_detected_outside_i (1'b0),
@@ -570,7 +570,7 @@ module hls_bridge_qos #(
         ) i_asf_par_062_qos_hls_tdata (
          .clk                                  (core_clk),                 // input
          .rst_n                                (core_rst_n),               // input
-         .chk__data_block_valid_i              (1'b1),
+         .chk__data_block_valid_i              (qos_valid[gv_y]),
          .chk__data_i                          ({{32-TLP_QOS_TDATA_WIDTH{1'b0}},qos_data_tab[gv_y]}),
          .chk__datachk_i                       ({{4-TLP_QOS_TDATA_CHK_WIDTH{1'b0}},qos_data_chk_tab[gv_y]}),
          .chk__parity_error_detected_outside_i (1'b0),
