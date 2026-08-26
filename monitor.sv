@@ -70,6 +70,7 @@ class cdn_pcie_hls_bridge_monitor extends uvm_component implements I_cdn_pcie_hl
   uvm_tlm_analysis_fifo #(denaliStreamTransaction) m_qos_slv_ended_af; 
   int unsigned m_qos_expected_count [int];
   int unsigned m_qos_observed_count [int];
+  int m_qos_np_hal_tag_scored [int];
 
   // QOS analysis ports -- written whenever  IB TLP is seen
   uvm_analysis_port #(cdn_hpa_pcie_tlp) m_hls_ib_posted_qos_ap   [];
@@ -1688,6 +1689,34 @@ endfunction
       //- Push packet to scoreboard -------------------------------------------
       m_hls_ib_nonposted_dti_scoreboard.write_received_tr(hls_ib_nonposted_dti_cxs_pkt);
 
+`ifdef HLSB_QOS_SUPP
+      begin
+        int l_tag    = int'(hls_ib_nonposted_dti_tlp_pkt.m_tlp_tag);
+        int l_stream = int'(hls_ib_nonposted_dti_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0]);
+        int l_group  = parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream;
+        if (m_qos_np_hal_tag_scored.exists(l_tag) && m_qos_np_hal_tag_scored[l_tag] > 0)
+          m_qos_np_hal_tag_scored[l_tag]--;
+        else begin
+          m_qos_expected_count[l_group]++;
+          `uvm_info("QOS_EXP_DTI", $sformatf("NONPOSTED DTI pkt_ended fill: stream=%0d NP group=%0d expected=%0d tag=0x%0h",
+            l_stream, l_group, m_qos_expected_count[l_group], l_tag), UVM_DEBUG)
+        end
+      end
+`else
+      if (m_env_cfg.m_qos_support) begin
+        int l_tag    = int'(hls_ib_nonposted_dti_tlp_pkt.m_tlp_tag);
+        int l_stream = int'(hls_ib_nonposted_dti_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0]);
+        int l_group  = parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream;
+        if (m_qos_np_hal_tag_scored.exists(l_tag) && m_qos_np_hal_tag_scored[l_tag] > 0)
+          m_qos_np_hal_tag_scored[l_tag]--;
+        else begin
+          m_qos_expected_count[l_group]++;
+          `uvm_info("QOS_EXP_DTI", $sformatf("NONPOSTED DTI pkt_ended fill: stream=%0d NP group=%0d expected=%0d tag=0x%0h",
+            l_stream, l_group, m_qos_expected_count[l_group], l_tag), UVM_DEBUG)
+        end
+      end
+`endif
+
       //- Calling Coverage callbacks -------------------------------------------
       // TODO: Add later
 /* -----\/----- EXCLUDED -----\/-----
@@ -3102,15 +3131,25 @@ endfunction
     nslot = cxs_pkt.UserControl.size() / meta_bytes;
     if (nslot < 1)
       nslot = 1;
+    begin
+      int n_eop;
+      n_eop = $countones(cxs_pkt.CurStartedPktTx & cxs_pkt.CurEndedPktTx);
+      if (n_eop > nslot)
+        nslot = n_eop;
+    end
 
     for (int s = 0; s < nslot; s++) begin
       if (s == 0)
         meta = primary_tlp.hls_ib_p_np_meta_s;
-      else begin
+      else if ((s+1)*meta_bytes <= cxs_pkt.UserControl.size()) begin
         ubytes = new[meta_bytes];
         for (int b = 0; b < meta_bytes; b++)
           ubytes[b] = cxs_pkt.UserControl[s*meta_bytes + b];
         meta = {<<byte{ubytes}};
+      end
+      else begin
+        meta = '0;
+        meta.hls_bridge_pkt_route_info = 2'b11;
       end
 
       stream = int'(meta.idgroup[2:0]);
@@ -3127,6 +3166,12 @@ endfunction
       end
       else if (route == 2'b11) begin
         m_qos_expected_count[group]++;
+        if (s == 0) begin
+          if (m_qos_np_hal_tag_scored.exists(primary_tlp.m_tlp_tag))
+            m_qos_np_hal_tag_scored[primary_tlp.m_tlp_tag]++;
+          else
+            m_qos_np_hal_tag_scored[primary_tlp.m_tlp_tag] = 1;
+        end
         `uvm_info("QOS_EXP_DTI", $sformatf("NONPOSTED DTI: stream=%0d NP group=%0d expected=%0d tag=0x%0h slot=%0d",
           stream, group, m_qos_expected_count[group], primary_tlp.m_tlp_tag, s), UVM_DEBUG)
       end
