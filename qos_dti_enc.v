@@ -164,21 +164,20 @@ module hls_bridge_qos_dti_pck_enc #(
       spilled_pck_next = spilled_pck_reg;
   end
 
-  // Spilled-packet stream ID: latch the stream ID of the spilling SOP
+  // Spilled-packet stream ID: latch on SOP-without-EOP; hold through the EOP
+  // cycle. The previous for-loop wrote stream 0 on every slot that was not the
+  // spilling SOP whenever any EOP was present, so NP group 8 over-counted.
   always @(*) begin : spilled_stream_id
     integer i;
-    for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1) begin
-      if (spilled_pck) begin
+    spilled_pck_stream_id = spilled_pck_stream_id_reg;
+    if (spilled_pck) begin
+      for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1) begin
         if (cntl_sop[i] & ~cntl_eop[i])
           spilled_pck_stream_id = cntl_metadata_stream_id[i];
-        else if (eop_detection)
-          spilled_pck_stream_id = 3'b000;
-        else
-          spilled_pck_stream_id = spilled_pck_stream_id_reg;
       end
-      else
-        spilled_pck_stream_id = 3'b000;
     end
+    else if (!spilled_pck_reg)
+      spilled_pck_stream_id = 3'b000;
   end
 
   // Full-packet stream ID: capture stream ID for slots where SOP and EOP coincide
@@ -203,14 +202,18 @@ module hls_bridge_qos_dti_pck_enc #(
       for (i = 0; i <= KMAX_NUM_TLPS_PER_CLK; i = i + 1)
         dti_stream_reg[i]       <= 3'b000;
     end
-    else if (hls_rx_dti_valid) begin
-      dti_valid                 <= hls_rx_dti_valid;
-      pck_ended_reg             <= pck_ended;
-      spilled_pck_reg           <= spilled_pck_next;
-      spilled_pck_stream_id_reg <= spilled_pck_stream_id;
-      for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1)
-        dti_stream_reg[i]                      <= dti_stream[i];
-      dti_stream_reg[KMAX_NUM_TLPS_PER_CLK]   <= spilled_pck_stream_id;
+    else begin
+      // Pulse: while valid is low the last pck_ended_reg must not keep enabling
+      // stream 0 for extra cycles (that was a sticky +1 on NP group 8).
+      pck_ended_reg <= hls_rx_dti_valid ? pck_ended : {KMAX_NUM_TLPS_PER_CLK+1{1'b0}};
+      if (hls_rx_dti_valid) begin
+        dti_valid                 <= 1'b1;
+        spilled_pck_reg           <= spilled_pck_next;
+        spilled_pck_stream_id_reg <= spilled_pck_stream_id;
+        for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1)
+          dti_stream_reg[i]                    <= dti_stream[i];
+        dti_stream_reg[KMAX_NUM_TLPS_PER_CLK] <= spilled_pck_stream_id;
+      end
     end
   end
 

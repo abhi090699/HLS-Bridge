@@ -338,6 +338,7 @@ class cdn_pcie_hls_bridge_env extends uvm_env implements I_cdn_pcie_hls_bridge_r
     //-- HLS IB HAL to HLS Bridge Monitor Connections -------------------------
     m_hls_ib_posted_hal_env.cxs_env.psv_agent.monitor.PktEndedCbPort.connect(m_env_mon.m_hls_ib_posted_hal_pkt_ended_af.analysis_export);
     m_hls_ib_nonposted_hal_env.cxs_env.psv_agent.monitor.PktEndedCbPort.connect(m_env_mon.m_hls_ib_nonposted_hal_pkt_ended_af.analysis_export);
+    m_hls_ib_nonposted_hal_env.cxs_env.psv_agent.monitor.PktStartedCbPort.connect(m_env_mon.m_hls_ib_nonposted_hal_pkt_started_af.analysis_export);
     m_hls_ib_compl_hal_env.cxs_env.psv_agent.monitor.PktEndedCbPort.connect(m_env_mon.m_hls_ib_compl_hal_pkt_ended_af.analysis_export);
 
 `ifdef DTI_TB_IN_PASSIVE_MODE
@@ -532,6 +533,7 @@ class cdn_pcie_hls_bridge_env extends uvm_env implements I_cdn_pcie_hls_bridge_r
     end
 
     //- HLS IB NonPosted HAL callbacks & Register Configuration ------------------
+    void'(m_hls_ib_nonposted_hal_env.cxs_env.psv_agent.setCallback(DENALI_CXS_CB_PktStarted));
     void'(m_hls_ib_nonposted_hal_env.cxs_env.psv_agent.setCallback(DENALI_CXS_CB_PktEnded));
     if(m_env_cfg.is_active()) begin
       void'(m_hls_ib_nonposted_hal_env.cxs_env.act_agent.setCallback(DENALI_CXS_CB_DataQueueExit));

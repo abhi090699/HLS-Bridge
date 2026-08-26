@@ -16,6 +16,7 @@ class cdn_pcie_hls_bridge_monitor extends uvm_component implements I_cdn_pcie_hl
   
   uvm_tlm_analysis_fifo #(denaliCxsTransaction)      m_hls_ib_posted_hal_pkt_ended_af                                          ;
   uvm_tlm_analysis_fifo #(denaliCxsTransaction)      m_hls_ib_nonposted_hal_pkt_ended_af                                       ;
+  uvm_tlm_analysis_fifo #(denaliCxsTransaction)      m_hls_ib_nonposted_hal_pkt_started_af                                     ;
   uvm_tlm_analysis_fifo #(denaliCxsTransaction)      m_hls_ib_compl_hal_pkt_ended_af                                           ;
 
 `ifdef DTI_TB_IN_PASSIVE_MODE
@@ -70,7 +71,6 @@ class cdn_pcie_hls_bridge_monitor extends uvm_component implements I_cdn_pcie_hl
   uvm_tlm_analysis_fifo #(denaliStreamTransaction) m_qos_slv_ended_af; 
   int unsigned m_qos_expected_count [int];
   int unsigned m_qos_observed_count [int];
-  int m_qos_np_hal_tag_scored [int];
 
   // QOS analysis ports -- written whenever  IB TLP is seen
   uvm_analysis_port #(cdn_hpa_pcie_tlp) m_hls_ib_posted_qos_ap   [];
@@ -317,7 +317,8 @@ class cdn_pcie_hls_bridge_monitor extends uvm_component implements I_cdn_pcie_hl
     m_hls_ob_compl_hal_pkt_ended_af     = new("m_hls_ob_compl_hal_pkt_ended_af"    , this);
     
     m_hls_ib_posted_hal_pkt_ended_af    = new("m_hls_ib_posted_hal_pkt_ended_af"   , this);
-    m_hls_ib_nonposted_hal_pkt_ended_af = new("m_hls_ib_nonposted_hal_pkt_ended_af", this);
+    m_hls_ib_nonposted_hal_pkt_ended_af   = new("m_hls_ib_nonposted_hal_pkt_ended_af", this);
+    m_hls_ib_nonposted_hal_pkt_started_af = new("m_hls_ib_nonposted_hal_pkt_started_af", this);
     m_hls_ib_compl_hal_pkt_ended_af     = new("m_hls_ib_compl_hal_pkt_ended_af"    , this);
     
 `ifdef DTI_TB_IN_PASSIVE_MODE
@@ -586,6 +587,7 @@ class cdn_pcie_hls_bridge_monitor extends uvm_component implements I_cdn_pcie_hl
       process_hls_ob_compl_hal_pkt_ended(.msg_id(l_msg_id));
       process_hls_ib_posted_hal_pkt_ended(.msg_id(l_msg_id));
       process_hls_ib_nonposted_hal_pkt_ended(.msg_id(l_msg_id));
+      process_hls_ib_nonposted_hal_pkt_started(.msg_id(l_msg_id));
       process_hls_ib_compl_hal_pkt_ended(.msg_id(l_msg_id));
       process_hdr2log_slv_ended(.msg_id(l_msg_id));
       process_lti_ctag_rx_ended(.msg_id(l_msg_id));      
@@ -602,8 +604,12 @@ class cdn_pcie_hls_bridge_monitor extends uvm_component implements I_cdn_pcie_hl
       posted_crd_lmt_prediction(l_msg_id);
       nonposted_crd_lmt_prediction(l_msg_id);
       cover_backpressure_scenario(m_env_cfg.en_backpressure_ib, m_env_cfg.en_backpressure_ob);
-      if(m_env_cfg.m_qos_support) 
-      	process_tlp_qos_tx(.msg_id(l_msg_id)); 
+`ifdef HLSB_QOS_SUPP
+      process_tlp_qos_tx(.msg_id(l_msg_id));
+`else
+      if(m_env_cfg.m_qos_support)
+        process_tlp_qos_tx(.msg_id(l_msg_id));
+`endif 
 
 `ifdef DTI_TB_IN_PASSIVE_MODE
       if (parameters_cfg_pkg::KMAX_DTI_SUPPORT)
@@ -1558,6 +1564,35 @@ endfunction
       m_total_num_pkts_sent++;
     end
   endtask : process_hls_ib_posted_hal_pkt_ended
+
+  // Score NP QoS on PktStarted, not PktEnded. DUT DTI encoder counts as soon as
+  // SOP/EOP land on hls_ib_nonposted_dti_cntl; HAL PktEnded is later, so midtest
+  // saw observed = expected+1 and never caught up. PktStarted is also the beat
+  // where packed flits still carry NumOfPkts/UserControl for every TLP slot.
+  virtual task process_hls_ib_nonposted_hal_pkt_started(string msg_id = "");
+    string                                 l_msg_id = {msg_id, "[process_hls_ib_nonposted_hal_pkt_started]"};
+    denaliCxsTransaction                   hls_ib_nonposted_hal_cxs_pkt;
+    cdn_hpa_pcie_tlp                       hls_ib_nonposted_hal_tlp_pkt;
+    cdn_pcie_hls_bridge_inbound_route_to_e l_route_to;
+    int                                    l_hls_port_num;
+
+    forever begin
+      m_hls_ib_nonposted_hal_pkt_started_af.get(hls_ib_nonposted_hal_cxs_pkt);
+      hls_ib_nonposted_hal_tlp_pkt = cdn_hpa_pcie_tlp::type_id::create("hls_ib_nonposted_hal_tlp_pkt");
+      hls_ib_nonposted_hal_tlp_pkt.m_tlp_req_type = CDN_HPA_PCIE_TRANS_NON_POSTED_REQ;
+      if (hls_ib_nonposted_hal_cxs_pkt.DataPerPktTx.size() != 0)
+        convert_cxs2tlp(.msg_id(l_msg_id), .is_rx(1'b0), .cxs_pkt(hls_ib_nonposted_hal_cxs_pkt), .tlp_pkt(hls_ib_nonposted_hal_tlp_pkt));
+      convert_userctrl2metadata(.msg_id(l_msg_id), .is_ib(1'b1), .cxs_pkt(hls_ib_nonposted_hal_cxs_pkt), .tlp_pkt(hls_ib_nonposted_hal_tlp_pkt));
+      predict_ib_pkt_routing(.msg_id(l_msg_id), .tlp_pkt(hls_ib_nonposted_hal_tlp_pkt), .route_to(l_route_to), .hls_port_num(l_hls_port_num));
+`ifdef HLSB_QOS_SUPP
+      qos_score_hal_np(hls_ib_nonposted_hal_cxs_pkt, hls_ib_nonposted_hal_tlp_pkt, l_hls_port_num);
+`else
+      if (m_env_cfg.m_qos_support)
+        qos_score_hal_np(hls_ib_nonposted_hal_cxs_pkt, hls_ib_nonposted_hal_tlp_pkt, l_hls_port_num);
+`endif
+    end
+  endtask : process_hls_ib_nonposted_hal_pkt_started
+
 //----------------------------------------------------------------------------
   // Task: process_hls_ib_nonposted_hal_pkt_ended
   //----------------------------------------------------------------------------
@@ -1582,13 +1617,6 @@ endfunction
 
       predict_ib_pkt_routing(.msg_id(l_msg_id), .tlp_pkt(hls_ib_nonposted_hal_tlp_pkt), .route_to(l_route_to), .hls_port_num(l_hls_port_num));
 
-`ifdef HLSB_QOS_SUPP
-        qos_score_hal_np(hls_ib_nonposted_hal_cxs_pkt, hls_ib_nonposted_hal_tlp_pkt, l_hls_port_num);
-`else
-      if (m_env_cfg.m_qos_support)
-        qos_score_hal_np(hls_ib_nonposted_hal_cxs_pkt, hls_ib_nonposted_hal_tlp_pkt, l_hls_port_num);
-`endif
-      
       //- Repacking TX To RX --------------------------------------------------- 
       repack_cxs_tx2rx(.msg_id(l_msg_id), .cxs_pkt(hls_ib_nonposted_hal_cxs_pkt));
       
@@ -1688,34 +1716,6 @@ endfunction
 
       //- Push packet to scoreboard -------------------------------------------
       m_hls_ib_nonposted_dti_scoreboard.write_received_tr(hls_ib_nonposted_dti_cxs_pkt);
-
-`ifdef HLSB_QOS_SUPP
-      begin
-        int l_tag    = int'(hls_ib_nonposted_dti_tlp_pkt.m_tlp_tag);
-        int l_stream = int'(hls_ib_nonposted_dti_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0]);
-        int l_group  = parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream;
-        if (m_qos_np_hal_tag_scored.exists(l_tag) && m_qos_np_hal_tag_scored[l_tag] > 0)
-          m_qos_np_hal_tag_scored[l_tag]--;
-        else begin
-          m_qos_expected_count[l_group]++;
-          `uvm_info("QOS_EXP_DTI", $sformatf("NONPOSTED DTI pkt_ended fill: stream=%0d NP group=%0d expected=%0d tag=0x%0h",
-            l_stream, l_group, m_qos_expected_count[l_group], l_tag), UVM_DEBUG)
-        end
-      end
-`else
-      if (m_env_cfg.m_qos_support) begin
-        int l_tag    = int'(hls_ib_nonposted_dti_tlp_pkt.m_tlp_tag);
-        int l_stream = int'(hls_ib_nonposted_dti_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0]);
-        int l_group  = parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream;
-        if (m_qos_np_hal_tag_scored.exists(l_tag) && m_qos_np_hal_tag_scored[l_tag] > 0)
-          m_qos_np_hal_tag_scored[l_tag]--;
-        else begin
-          m_qos_expected_count[l_group]++;
-          `uvm_info("QOS_EXP_DTI", $sformatf("NONPOSTED DTI pkt_ended fill: stream=%0d NP group=%0d expected=%0d tag=0x%0h",
-            l_stream, l_group, m_qos_expected_count[l_group], l_tag), UVM_DEBUG)
-        end
-      end
-`endif
 
       //- Calling Coverage callbacks -------------------------------------------
       // TODO: Add later
@@ -2828,6 +2828,7 @@ endfunction
     
     m_hls_ib_posted_hal_pkt_ended_af.flush();
     m_hls_ib_nonposted_hal_pkt_ended_af.flush();
+    m_hls_ib_nonposted_hal_pkt_started_af.flush();
     m_hls_ib_compl_hal_pkt_ended_af.flush();
 
 `ifdef DTI_TB_IN_PASSIVE_MODE
@@ -3108,9 +3109,6 @@ endfunction
 
   endtask : convert_userctrl2metadata
 
-  // One HAL pkt_ended can carry several TLP slots (tlp2cxs DEBUG_META per TLP,
-  // convert_cxs2tlp only keeps the first). DUT DTI QoS counts every SOP/EOP.
-  // Extra AXI slots are not qos_seq'd so they must not add expected.
   function void qos_score_hal_np(denaliCxsTransaction cxs_pkt, cdn_hpa_pcie_tlp primary_tlp, int unsigned axi_port);
     int meta_bytes;
     int nslot;
@@ -3129,14 +3127,10 @@ endfunction
     if (meta_bytes < 1)
       meta_bytes = 1;
     nslot = cxs_pkt.UserControl.size() / meta_bytes;
+    if (!$isunknown(cxs_pkt.NumOfPkts) && int'(cxs_pkt.NumOfPkts) > nslot)
+      nslot = int'(cxs_pkt.NumOfPkts);
     if (nslot < 1)
       nslot = 1;
-    begin
-      int n_eop;
-      n_eop = $countones(cxs_pkt.CurStartedPktTx & cxs_pkt.CurEndedPktTx);
-      if (n_eop > nslot)
-        nslot = n_eop;
-    end
 
     for (int s = 0; s < nslot; s++) begin
       if (s == 0)
@@ -3147,33 +3141,24 @@ endfunction
           ubytes[b] = cxs_pkt.UserControl[s*meta_bytes + b];
         meta = {<<byte{ubytes}};
       end
-      else begin
-        meta = '0;
-        meta.hls_bridge_pkt_route_info = 2'b11;
-      end
+      else
+        meta = primary_tlp.hls_ib_p_np_meta_s;
 
       stream = int'(meta.idgroup[2:0]);
       group  = parameters_cfg_pkg::NUM_TLP_STREAMS + stream;
       route  = meta.hls_bridge_pkt_route_info[1:0];
 
       if (route == 2'b00 || route == 2'b01) begin
-        if (s == 0) begin
+        if (s == 0)
           m_hls_ib_nonposted_qos_ap[axi_port].write(primary_tlp);
-          m_qos_expected_count[group]++;
-          `uvm_info("QOS_EXP_AXI", $sformatf("NONPOSTED AXI: port=%0d stream=%0d NP group=%0d expected=%0d raw_route_info=0x%0h tlp_type=%0s tag=0x%0h slot=%0d",
-            axi_port, stream, group, m_qos_expected_count[group], route, primary_tlp.m_tlp_type.name(), primary_tlp.m_tlp_tag, s), UVM_DEBUG)
-        end
+        m_qos_expected_count[group]++;
+        `uvm_info("QOS_EXP_AXI", $sformatf("NONPOSTED AXI: port=%0d stream=%0d NP group=%0d expected=%0d raw_route_info=0x%0h slot=%0d",
+          axi_port, stream, group, m_qos_expected_count[group], route, s), UVM_DEBUG)
       end
       else if (route == 2'b11) begin
         m_qos_expected_count[group]++;
-        if (s == 0) begin
-          if (m_qos_np_hal_tag_scored.exists(primary_tlp.m_tlp_tag))
-            m_qos_np_hal_tag_scored[primary_tlp.m_tlp_tag]++;
-          else
-            m_qos_np_hal_tag_scored[primary_tlp.m_tlp_tag] = 1;
-        end
-        `uvm_info("QOS_EXP_DTI", $sformatf("NONPOSTED DTI: stream=%0d NP group=%0d expected=%0d tag=0x%0h slot=%0d",
-          stream, group, m_qos_expected_count[group], primary_tlp.m_tlp_tag, s), UVM_DEBUG)
+        `uvm_info("QOS_EXP_DTI", $sformatf("NONPOSTED DTI: stream=%0d NP group=%0d expected=%0d slot=%0d nslot=%0d uc_bytes=%0d",
+          stream, group, m_qos_expected_count[group], s, nslot, cxs_pkt.UserControl.size()), UVM_MEDIUM)
       end
     end
   endfunction : qos_score_hal_np
