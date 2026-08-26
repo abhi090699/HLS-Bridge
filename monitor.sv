@@ -1473,8 +1473,7 @@ endfunction
       //- Predict where the inbound pkt should be routed to. -------------------
       predict_ib_pkt_routing(.msg_id(l_msg_id), .tlp_pkt(hls_ib_posted_hal_tlp_pkt), .route_to(l_route_to), .hls_port_num(l_hls_port_num));
 
-      l_stream = int'(qos_stream_from_cxs(hls_ib_posted_hal_cxs_pkt));
-      hls_ib_posted_hal_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0] = l_stream[2:0];
+      l_stream = int'(hls_ib_posted_hal_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0]);
 
       //- Push packet to scoreboard --------------------------------------------
       if(l_route_to == ROUTE_TO_MSI) begin
@@ -1590,10 +1589,9 @@ endfunction
       predict_ib_pkt_routing(.msg_id(l_msg_id), .tlp_pkt(hls_ib_nonposted_hal_tlp_pkt), .route_to(l_route_to), .hls_port_num(l_hls_port_num));
 
       if (m_env_cfg.m_qos_support) begin
-        `uvm_info("QOS_ROUTE_CHECK", $sformatf("tag=0x%0h idgroup_struct=%0d idgroup_dut_bits=%0d raw_route_info=0x%0h resolved_route=%0s",
+        `uvm_info("QOS_ROUTE_CHECK", $sformatf("tag=0x%0h idgroup=%0d raw_route_info=0x%0h resolved_route=%0s",
           hls_ib_nonposted_hal_tlp_pkt.m_tlp_tag,
           int'(hls_ib_nonposted_hal_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0]),
-          int'(qos_stream_from_cxs(hls_ib_nonposted_hal_cxs_pkt)),
           int'(hls_ib_nonposted_hal_tlp_pkt.hls_ib_p_np_meta_s.hls_bridge_pkt_route_info),
           l_route_to.name()), UVM_MEDIUM)
       end
@@ -1602,9 +1600,8 @@ endfunction
       if(l_route_to == ROUTE_TO_AXI) begin
        	 m_hls_ib_nonposted_cxs_scoreboard[l_hls_port_num].write_expected_tr(hls_ib_nonposted_hal_cxs_pkt);
         if (m_env_cfg.m_qos_support) begin
-	    int l_stream = int'(qos_stream_from_cxs(hls_ib_nonposted_hal_cxs_pkt));
+	    int l_stream = int'(hls_ib_nonposted_hal_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0]);
 	    int l_group = parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream;   // NP group
-            hls_ib_nonposted_hal_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0] = l_stream[2:0];
 	    m_hls_ib_nonposted_qos_ap[l_hls_port_num].write(hls_ib_nonposted_hal_tlp_pkt);
             m_qos_expected_count[l_group]++;
 	    `uvm_info("QOS_EXP_AXI", $sformatf("NONPOSTED AXI: port=%0d stream=%0d NP group=%0d expected=%0d raw_route_info=0x%0h tlp_type=%0s tag=0x%0h",l_hls_port_num, l_stream, l_group, m_qos_expected_count[l_group], hls_ib_nonposted_hal_tlp_pkt.hls_ib_p_np_meta_s.hls_bridge_pkt_route_info, hls_ib_nonposted_hal_tlp_pkt.m_tlp_type.name(), hls_ib_nonposted_hal_tlp_pkt.m_tlp_tag), UVM_DEBUG)
@@ -1614,9 +1611,8 @@ endfunction
       else if(l_route_to == ROUTE_TO_DTI) begin
         m_hls_ib_nonposted_dti_scoreboard.write_expected_tr(hls_ib_nonposted_hal_cxs_pkt);
         if (m_env_cfg.m_qos_support) begin
-          int l_stream = int'(qos_stream_from_cxs(hls_ib_nonposted_hal_cxs_pkt));
+          int l_stream = int'(hls_ib_nonposted_hal_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0]);
           int l_group = parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream;
-          hls_ib_nonposted_hal_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0] = l_stream[2:0];
           m_qos_expected_count[l_group]++;
           `uvm_info("QOS_EXP_DTI", $sformatf("NONPOSTED DTI: stream=%0d NP group=%0d expected=%0d tag=0x%0h",
               l_stream, l_group, m_qos_expected_count[l_group], hls_ib_nonposted_hal_tlp_pkt.m_tlp_tag), UVM_DEBUG)
@@ -3101,19 +3097,6 @@ endfunction
     end
 
   endtask : convert_userctrl2metadata
-
-  // DUT IB P/NP metadata places idgroup at [48+:3] (HLS cntl). The named
-  // struct field can sit elsewhere after CXS byte-unpack, so QoS scoring
-  // must use the DUT bit slice. idgroup 0 is valid (no-window / SO).
-  function bit [2:0] qos_stream_from_cxs(denaliCxsTransaction cxs_pkt);
-    bit [$bits(cdn_pcie_hls_ib_p_np_metadata_s)-1:0] l_meta_bits;
-    qos_stream_from_cxs = 3'b000;
-    if (cxs_pkt == null || cxs_pkt.UserControl.size() == 0)
-      return qos_stream_from_cxs;
-    l_meta_bits = {<<byte{cxs_pkt.UserControl}};
-    if ($bits(l_meta_bits) >= 51)
-      qos_stream_from_cxs = l_meta_bits[48 +: 3];
-  endfunction : qos_stream_from_cxs
   
   //----------------------------------------------------------------------------
   // Function:    update_ob_metadata

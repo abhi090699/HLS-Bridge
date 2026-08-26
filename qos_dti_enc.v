@@ -67,13 +67,11 @@ module hls_bridge_qos_dti_pck_enc #(
 
   reg                                          spilled_pck_next;
   reg [2:0]                                    spilled_pck_stream_id;
-  reg                                          spilled_pck_id_valid;
   reg [2:0]                                    dti_stream         [KMAX_NUM_TLPS_PER_CLK-1:0];
 
   reg                                          dti_valid;
   reg                                          spilled_pck_reg;
   reg [2:0]                                    spilled_pck_stream_id_reg;
-  reg                                          spilled_pck_id_valid_reg;
   reg [2:0]                                    dti_stream_reg     [KMAX_NUM_TLPS_PER_CLK:0];
   reg [METADATA_STREAM_ID_WD-1:0]              cntl_metadata_stream_id [KMAX_NUM_TLPS_PER_CLK-1:0];
 
@@ -154,10 +152,7 @@ module hls_bridge_qos_dti_pck_enc #(
   // Per-slot packet-ended flags (K+1 bits: K normal slots + 1 spill slot)
   assign pck_ended[KMAX_NUM_TLPS_PER_CLK-1:0] =
       hls_rx_dti_valid ? (sop_shift & cntl_eop) : {KMAX_NUM_TLPS_PER_CLK{1'b0}};
-  // Count a completing spill only if a SOP-without-EOP actually latched a stream.
-  // Otherwise the spill slot defaults to stream 0 and NP group 8 over-counts.
-  assign pck_ended[KMAX_NUM_TLPS_PER_CLK] =
-      spilled_pck_reg & eop_detection & spilled_pck_id_valid_reg;
+  assign pck_ended[KMAX_NUM_TLPS_PER_CLK] = spilled_pck_reg & eop_detection;
 
   // Spill state: set on spill detected, cleared when the deferred EOP arrives
   always @(*) begin : process_spilled_pck_comb
@@ -169,38 +164,29 @@ module hls_bridge_qos_dti_pck_enc #(
       spilled_pck_next = spilled_pck_reg;
   end
 
-  // Spilled-packet stream ID: capture the SOP-without-EOP slot. Keep the
-  // previously latched ID on the completing-EOP cycle (spilled_pck is then
-  // 0). Do not walk every slot and force 0 on eop_detection — later slots
-  // would overwrite a valid stream with 0 and QoS would count NP/P stream 0.
+  // Spilled-packet stream ID: latch the stream ID of the spilling SOP
   always @(*) begin : spilled_stream_id
     integer i;
-    spilled_pck_stream_id = spilled_pck_stream_id_reg;
-    spilled_pck_id_valid  = spilled_pck_id_valid_reg;
-    if (spilled_pck) begin
-      for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1) begin
-        if (sop_shift[i] & ~cntl_eop[i]) begin
-          if (spilled_pck_reg && (i != 0))
-            spilled_pck_stream_id = cntl_metadata_stream_id[i-1];
-          else
-            spilled_pck_stream_id = cntl_metadata_stream_id[i];
-          spilled_pck_id_valid = 1'b1;
-        end
+    for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1) begin
+      if (spilled_pck) begin
+        if (cntl_sop[i] & ~cntl_eop[i])
+          spilled_pck_stream_id = cntl_metadata_stream_id[i];
+        else if (eop_detection)
+          spilled_pck_stream_id = 3'b000;
+        else
+          spilled_pck_stream_id = spilled_pck_stream_id_reg;
       end
+      else
+        spilled_pck_stream_id = 3'b000;
     end
   end
 
-  // Full-packet stream ID: SOP/EOP same cycle. When a spill is pending, SOPs
-  // are shifted left so metadata must come from the pre-shift slot.
+  // Full-packet stream ID: capture stream ID for slots where SOP and EOP coincide
   always @(*) begin : full_pck_detection
     integer i;
     for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1) begin
-      if (sop_shift[i] & cntl_eop[i] & hls_rx_dti_valid) begin
-        if (spilled_pck_reg && (i != 0))
-          dti_stream[i] = cntl_metadata_stream_id[i-1];
-        else
-          dti_stream[i] = cntl_metadata_stream_id[i];
-      end
+      if (sop_shift[i] & cntl_eop[i] & hls_rx_dti_valid)
+        dti_stream[i] = cntl_metadata_stream_id[i];
       else
         dti_stream[i] = 3'b000;
     end
@@ -214,23 +200,17 @@ module hls_bridge_qos_dti_pck_enc #(
       pck_ended_reg             <= {KMAX_NUM_TLPS_PER_CLK+1{1'b0}};
       spilled_pck_reg           <= 1'b0;
       spilled_pck_stream_id_reg <= 3'b000;
-      spilled_pck_id_valid_reg  <= 1'b0;
       for (i = 0; i <= KMAX_NUM_TLPS_PER_CLK; i = i + 1)
         dti_stream_reg[i]       <= 3'b000;
     end
-    else begin
-      // One-cycle pulse: do not hold pck_ended_reg while valid is low
-      // (that previously left stream 0 enabled and over-counted NP group 8).
-      pck_ended_reg <= hls_rx_dti_valid ? pck_ended : {KMAX_NUM_TLPS_PER_CLK+1{1'b0}};
-      if (hls_rx_dti_valid) begin
-        dti_valid                 <= 1'b1;
-        spilled_pck_reg           <= spilled_pck_next;
-        spilled_pck_stream_id_reg <= spilled_pck_stream_id;
-        spilled_pck_id_valid_reg  <= spilled_pck_next ? spilled_pck_id_valid : 1'b0;
-        for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1)
-          dti_stream_reg[i]                    <= dti_stream[i];
-        dti_stream_reg[KMAX_NUM_TLPS_PER_CLK] <= spilled_pck_stream_id_reg;
-      end
+    else if (hls_rx_dti_valid) begin
+      dti_valid                 <= hls_rx_dti_valid;
+      pck_ended_reg             <= pck_ended;
+      spilled_pck_reg           <= spilled_pck_next;
+      spilled_pck_stream_id_reg <= spilled_pck_stream_id;
+      for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1)
+        dti_stream_reg[i]                      <= dti_stream[i];
+      dti_stream_reg[KMAX_NUM_TLPS_PER_CLK]   <= spilled_pck_stream_id;
     end
   end
 
