@@ -1578,25 +1578,18 @@ endfunction
       
       //- Convert Userctrl To Metadata ----------------------------------------
       convert_userctrl2metadata(.msg_id(l_msg_id), .is_ib(1'b1), .cxs_pkt(hls_ib_nonposted_hal_cxs_pkt), .tlp_pkt(hls_ib_nonposted_hal_tlp_pkt));
+
+      predict_ib_pkt_routing(.msg_id(l_msg_id), .tlp_pkt(hls_ib_nonposted_hal_tlp_pkt), .route_to(l_route_to), .hls_port_num(l_hls_port_num));
+
+`ifdef HLSB_QOS_SUPP
+        qos_score_hal_np(hls_ib_nonposted_hal_cxs_pkt, hls_ib_nonposted_hal_tlp_pkt, l_hls_port_num);
+`else
+      if (m_env_cfg.m_qos_support)
+        qos_score_hal_np(hls_ib_nonposted_hal_cxs_pkt, hls_ib_nonposted_hal_tlp_pkt, l_hls_port_num);
+`endif
       
       //- Repacking TX To RX --------------------------------------------------- 
       repack_cxs_tx2rx(.msg_id(l_msg_id), .cxs_pkt(hls_ib_nonposted_hal_cxs_pkt));
-      
-      //- Print Converted TLP --------------------------------------------------
-      // print_tlp(.msg_id(l_msg_id), .tlp_pkt(hls_ib_nonposted_hal_tlp_pkt), .str("Expected IB NonPosted"));
-
-      //- Predict where the inbound pkt should be routed to. -------------------
-      predict_ib_pkt_routing(.msg_id(l_msg_id), .tlp_pkt(hls_ib_nonposted_hal_tlp_pkt), .route_to(l_route_to), .hls_port_num(l_hls_port_num));
-
-      if (m_env_cfg.m_qos_support) begin
-        `uvm_info("QOS_ROUTE_CHECK", $sformatf("tag=0x%0h idgroup=%0d raw_route_info=0x%0h resolved_route=%0s uc_bytes=%0d",
-          hls_ib_nonposted_hal_tlp_pkt.m_tlp_tag,
-          int'(hls_ib_nonposted_hal_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0]),
-          int'(hls_ib_nonposted_hal_tlp_pkt.hls_ib_p_np_meta_s.hls_bridge_pkt_route_info),
-          l_route_to.name(),
-          hls_ib_nonposted_hal_cxs_pkt.UserControl.size()), UVM_MEDIUM)
-        qos_score_hal_np(hls_ib_nonposted_hal_cxs_pkt, hls_ib_nonposted_hal_tlp_pkt, l_hls_port_num);
-      end
       
       //- Push packet to scoreboard --------------------------------------------
       if(l_route_to == ROUTE_TO_AXI) begin
@@ -3098,8 +3091,10 @@ endfunction
     cdn_pcie_hls_ib_p_np_metadata_s meta;
     bit [7:0] ubytes[];
 
+`ifndef HLSB_QOS_SUPP
     if (!m_env_cfg.m_qos_support)
       return;
+`endif
 
     meta_bytes = $bits(cdn_pcie_hls_ib_p_np_metadata_s)/8;
     if (meta_bytes < 1)
