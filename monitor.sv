@@ -1523,7 +1523,13 @@ endfunction
 `ifdef DTI_TB_IN_PASSIVE_MODE
       else if(l_route_to == ROUTE_TO_DTI) begin
         m_hls_ib_posted_dti_scoreboard.write_expected_tr(hls_ib_posted_hal_cxs_pkt);
-        // DTI QoS expected is scored on DTI pkt_ended (same SOP/EOP the DUT encoder sees).
+        if (m_env_cfg.m_qos_support) begin
+          int l_group = l_stream;   // P group
+          `uvm_info({l_msg_id, "[QOS_POSTED_DTI]"}, $sformatf("Posted TLP to QOS AP via DTI: stream=%0d", l_stream), UVM_DEBUG)
+          m_qos_expected_count[l_group]++;
+          `uvm_info("QOS_EXP_DTI", $sformatf("POSTED DTI: stream=%0d P group=%0d expected=%0d",
+              l_stream, l_group, m_qos_expected_count[l_group]), UVM_DEBUG)
+        end
       end
 `endif
       else if(l_route_to == ROUTE_TO_AXI) begin
@@ -1607,7 +1613,14 @@ endfunction
 `ifdef DTI_TB_IN_PASSIVE_MODE
       else if(l_route_to == ROUTE_TO_DTI) begin
         m_hls_ib_nonposted_dti_scoreboard.write_expected_tr(hls_ib_nonposted_hal_cxs_pkt);
-        // DTI QoS expected is scored on DTI pkt_ended (same SOP/EOP the DUT encoder sees).
+        if (m_env_cfg.m_qos_support) begin
+          int l_stream = int'(qos_stream_from_cxs(hls_ib_nonposted_hal_cxs_pkt));
+          int l_group = parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream;
+          hls_ib_nonposted_hal_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0] = l_stream[2:0];
+          m_qos_expected_count[l_group]++;
+          `uvm_info("QOS_EXP_DTI", $sformatf("NONPOSTED DTI: stream=%0d NP group=%0d expected=%0d tag=0x%0h",
+              l_stream, l_group, m_qos_expected_count[l_group], hls_ib_nonposted_hal_tlp_pkt.m_tlp_tag), UVM_DEBUG)
+        end
       end
 `endif
       //-Tracking IB packet sequence
@@ -1698,16 +1711,6 @@ endfunction
       //- Push packet to scoreboard -------------------------------------------
       m_hls_ib_nonposted_dti_scoreboard.write_received_tr(hls_ib_nonposted_dti_cxs_pkt);
 
-      if (m_env_cfg.m_qos_support) begin
-        int l_stream = int'(qos_stream_from_cxs(hls_ib_nonposted_dti_cxs_pkt));
-        int l_group  = parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream;
-        m_qos_expected_count[l_group]++;
-        `uvm_info("QOS_EXP_DTI", $sformatf("NONPOSTED DTI: stream=%0d NP group=%0d expected=%0d tag=0x%0h struct_idgroup=%0d",
-          l_stream, l_group, m_qos_expected_count[l_group],
-          hls_ib_nonposted_dti_tlp_pkt.m_tlp_tag,
-          int'(hls_ib_nonposted_dti_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0])), UVM_DEBUG)
-      end
-
       //- Calling Coverage callbacks -------------------------------------------
       // TODO: Add later
 /* -----\/----- EXCLUDED -----\/-----
@@ -1746,16 +1749,6 @@ endfunction
 
       //- Push packet to scoreboard --------------------------------------------
       m_hls_ib_posted_dti_scoreboard.write_received_tr(hls_ib_posted_dti_cxs_pkt);
-
-      if (m_env_cfg.m_qos_support) begin
-        int l_stream = int'(qos_stream_from_cxs(hls_ib_posted_dti_cxs_pkt));
-        int l_group  = l_stream;
-        m_qos_expected_count[l_group]++;
-        `uvm_info("QOS_EXP_DTI", $sformatf("POSTED DTI: stream=%0d P group=%0d expected=%0d tag=0x%0h struct_idgroup=%0d",
-          l_stream, l_group, m_qos_expected_count[l_group],
-          hls_ib_posted_dti_tlp_pkt.m_tlp_tag,
-          int'(hls_ib_posted_dti_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0])), UVM_DEBUG)
-      end
 
       //- Send to IB Posted Order Checker --------------------------------------
       dti_ib_posted_pkt_ended_ap.write(hls_ib_posted_dti_cxs_pkt);
