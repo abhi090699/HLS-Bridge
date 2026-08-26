@@ -1589,34 +1589,22 @@ endfunction
       predict_ib_pkt_routing(.msg_id(l_msg_id), .tlp_pkt(hls_ib_nonposted_hal_tlp_pkt), .route_to(l_route_to), .hls_port_num(l_hls_port_num));
 
       if (m_env_cfg.m_qos_support) begin
-        `uvm_info("QOS_ROUTE_CHECK", $sformatf("tag=0x%0h idgroup=%0d raw_route_info=0x%0h resolved_route=%0s",
+        `uvm_info("QOS_ROUTE_CHECK", $sformatf("tag=0x%0h idgroup=%0d raw_route_info=0x%0h resolved_route=%0s uc_bytes=%0d",
           hls_ib_nonposted_hal_tlp_pkt.m_tlp_tag,
           int'(hls_ib_nonposted_hal_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0]),
           int'(hls_ib_nonposted_hal_tlp_pkt.hls_ib_p_np_meta_s.hls_bridge_pkt_route_info),
-          l_route_to.name()), UVM_MEDIUM)
+          l_route_to.name(),
+          hls_ib_nonposted_hal_cxs_pkt.UserControl.size()), UVM_MEDIUM)
+        qos_score_hal_np(hls_ib_nonposted_hal_cxs_pkt, hls_ib_nonposted_hal_tlp_pkt, l_hls_port_num);
       end
       
       //- Push packet to scoreboard --------------------------------------------
       if(l_route_to == ROUTE_TO_AXI) begin
        	 m_hls_ib_nonposted_cxs_scoreboard[l_hls_port_num].write_expected_tr(hls_ib_nonposted_hal_cxs_pkt);
-        if (m_env_cfg.m_qos_support) begin
-	    int l_stream = int'(hls_ib_nonposted_hal_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0]);
-	    int l_group = parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream;   // NP group
-	    m_hls_ib_nonposted_qos_ap[l_hls_port_num].write(hls_ib_nonposted_hal_tlp_pkt);
-            m_qos_expected_count[l_group]++;
-	    `uvm_info("QOS_EXP_AXI", $sformatf("NONPOSTED AXI: port=%0d stream=%0d NP group=%0d expected=%0d raw_route_info=0x%0h tlp_type=%0s tag=0x%0h",l_hls_port_num, l_stream, l_group, m_qos_expected_count[l_group], hls_ib_nonposted_hal_tlp_pkt.hls_ib_p_np_meta_s.hls_bridge_pkt_route_info, hls_ib_nonposted_hal_tlp_pkt.m_tlp_type.name(), hls_ib_nonposted_hal_tlp_pkt.m_tlp_tag), UVM_DEBUG)
-        end
       end
 `ifdef DTI_TB_IN_PASSIVE_MODE
       else if(l_route_to == ROUTE_TO_DTI) begin
         m_hls_ib_nonposted_dti_scoreboard.write_expected_tr(hls_ib_nonposted_hal_cxs_pkt);
-        if (m_env_cfg.m_qos_support) begin
-          int l_stream = int'(hls_ib_nonposted_hal_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0]);
-          int l_group = parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream;
-          m_qos_expected_count[l_group]++;
-          `uvm_info("QOS_EXP_DTI", $sformatf("NONPOSTED DTI: stream=%0d NP group=%0d expected=%0d tag=0x%0h",
-              l_stream, l_group, m_qos_expected_count[l_group], hls_ib_nonposted_hal_tlp_pkt.m_tlp_tag), UVM_DEBUG)
-        end
       end
 `endif
       //-Tracking IB packet sequence
@@ -3097,6 +3085,58 @@ endfunction
     end
 
   endtask : convert_userctrl2metadata
+
+  // One HAL pkt_ended can carry several TLP slots (tlp2cxs DEBUG_META per TLP,
+  // convert_cxs2tlp only keeps the first). DUT DTI QoS counts every SOP/EOP.
+  // Extra AXI slots are not qos_seq'd so they must not add expected.
+  function void qos_score_hal_np(denaliCxsTransaction cxs_pkt, cdn_hpa_pcie_tlp primary_tlp, int unsigned axi_port);
+    int meta_bytes;
+    int nslot;
+    int stream;
+    int group;
+    bit [1:0] route;
+    cdn_pcie_hls_ib_p_np_metadata_s meta;
+    bit [7:0] ubytes[];
+
+    if (!m_env_cfg.m_qos_support)
+      return;
+
+    meta_bytes = $bits(cdn_pcie_hls_ib_p_np_metadata_s)/8;
+    if (meta_bytes < 1)
+      meta_bytes = 1;
+    nslot = cxs_pkt.UserControl.size() / meta_bytes;
+    if (nslot < 1)
+      nslot = 1;
+
+    for (int s = 0; s < nslot; s++) begin
+      if (s == 0)
+        meta = primary_tlp.hls_ib_p_np_meta_s;
+      else begin
+        ubytes = new[meta_bytes];
+        for (int b = 0; b < meta_bytes; b++)
+          ubytes[b] = cxs_pkt.UserControl[s*meta_bytes + b];
+        meta = {<<byte{ubytes}};
+      end
+
+      stream = int'(meta.idgroup[2:0]);
+      group  = parameters_cfg_pkg::NUM_TLP_STREAMS + stream;
+      route  = meta.hls_bridge_pkt_route_info[1:0];
+
+      if (route == 2'b00 || route == 2'b01) begin
+        if (s == 0) begin
+          m_hls_ib_nonposted_qos_ap[axi_port].write(primary_tlp);
+          m_qos_expected_count[group]++;
+          `uvm_info("QOS_EXP_AXI", $sformatf("NONPOSTED AXI: port=%0d stream=%0d NP group=%0d expected=%0d raw_route_info=0x%0h tlp_type=%0s tag=0x%0h slot=%0d",
+            axi_port, stream, group, m_qos_expected_count[group], route, primary_tlp.m_tlp_type.name(), primary_tlp.m_tlp_tag, s), UVM_DEBUG)
+        end
+      end
+      else if (route == 2'b11) begin
+        m_qos_expected_count[group]++;
+        `uvm_info("QOS_EXP_DTI", $sformatf("NONPOSTED DTI: stream=%0d NP group=%0d expected=%0d tag=0x%0h slot=%0d",
+          stream, group, m_qos_expected_count[group], primary_tlp.m_tlp_tag, s), UVM_DEBUG)
+      end
+    end
+  endfunction : qos_score_hal_np
   
   //----------------------------------------------------------------------------
   // Function:    update_ob_metadata
