@@ -2203,11 +2203,11 @@ module hls_bridge_top #(
   localparam DC_ASF_NODE_ID_WIDTH            = (NUM_HLS_PORTS +KMAX_DTI_SUPPORT +KMAX_MSI_IF_SUPPORT)*16;
   localparam DC_ASF_EVENT_DIAG_FIELD_WIDTH   = (NUM_HLS_PORTS +KMAX_DTI_SUPPORT +KMAX_MSI_IF_SUPPORT)*28;
 
-  localparam QOS_ASF_EVENT_VALID_WIDTH        = (NUM_HLS_PORTS +KMAX_DTI_SUPPORT +KMAX_MSI_IF_SUPPORT)   ;
-  localparam QOS_ASF_EVENT_TYPE_WIDTH         = (NUM_HLS_PORTS +KMAX_DTI_SUPPORT +KMAX_MSI_IF_SUPPORT)*4 ;
-  localparam QOS_ASF_EVENT_COUNT_WIDTH        = (NUM_HLS_PORTS +KMAX_DTI_SUPPORT +KMAX_MSI_IF_SUPPORT)*8 ;
-  localparam QOS_ASF_NODE_ID_WIDTH            = (NUM_HLS_PORTS +KMAX_DTI_SUPPORT +KMAX_MSI_IF_SUPPORT)*16;
-  localparam QOS_ASF_EVENT_DIAG_FIELD_WIDTH   = (NUM_HLS_PORTS +KMAX_DTI_SUPPORT +KMAX_MSI_IF_SUPPORT)*28;
+  localparam QOS_ASF_EVENT_VALID_WIDTH        = (NUM_HLS_PORTS +KMAX_MSI_IF_SUPPORT)   ;
+  localparam QOS_ASF_EVENT_TYPE_WIDTH         = (NUM_HLS_PORTS +KMAX_MSI_IF_SUPPORT)*4 ;
+  localparam QOS_ASF_EVENT_COUNT_WIDTH        = (NUM_HLS_PORTS +KMAX_MSI_IF_SUPPORT)*8 ;
+  localparam QOS_ASF_NODE_ID_WIDTH            = (NUM_HLS_PORTS +KMAX_MSI_IF_SUPPORT)*16;
+  localparam QOS_ASF_EVENT_DIAG_FIELD_WIDTH   = (NUM_HLS_PORTS +KMAX_MSI_IF_SUPPORT)*28;
 
   localparam CTAG_ASF_EVENT_VALID_WIDTH        = (KMAX_MSI_IF_SUPPORT +NUM_HLS_PORTS)    ;
   localparam CTAG_ASF_EVENT_TYPE_WIDTH         = (KMAX_MSI_IF_SUPPORT +NUM_HLS_PORTS)*4  ;
@@ -4276,10 +4276,15 @@ endgenerate
      .NUM_HLS_PORTS                 (NUM_HLS_PORTS),
      .KMAX_MSI_IF_SUPPORT           (KMAX_MSI_IF_SUPPORT),
      .KMAX_DTI_SUPPORT              (KMAX_DTI_SUPPORT),
-     .NUM_TLP_STREAMS               (NUM_TLP_STREAMS),
+     .LBB_NUM_TLP_STREAMS           (NUM_TLP_STREAMS),
      .TLP_QOS_TDATA_WIDTH           (TLP_QOS_TDATA_WIDTH),
      .TLP_QOS_TDATA_CHK_WIDTH       (TLP_QOS_TDATA_CHK_WIDTH),
      .MSI_QOS_DATA_WIDTH            (MSI_QOS_DATA_WIDTH),
+     .KMAX_DATAPATH_WD              (KMAX_DATAPATH_WD),
+     .HLS_DTI_CNTL_WD               (HLS_HAL_IB_PNP_CNTL_WD),
+     .KMAX_NUM_TLPS_PER_CLK         (KMAX_NUM_TLPS_PER_CLK),
+     .HLS_METADATA_WD               (HLS_RX_PNP_METADATA_WD),
+     .HLS_DW_ALIGNMENT              (HLS_DW_ALIGNMENT),
    //------------------------------------------------------------------------------
    //ASF
    //------------------------------------------------------------------------------
@@ -4301,10 +4306,10 @@ endgenerate
      .axi_qos_rx_tvalid_chk                    (tlp_qos_rx_tvalid_chk),//input wire [NUM_HLS_PORTS-1:0]
      .axi_qos_rx_tdata_chk                     (tlp_qos_rx_tdata_chk),//input wire [NUM_HLS_PORTS*TLP_QOS_TDATA_CHK_WIDTH-1:0]
 
-     .dti_qos_rx_tvalid                        (1'b0),
-     .dti_qos_rx_tdata                         ({TLP_QOS_TDATA_WIDTH{1'b0}}),
-     .dti_qos_rx_tvalid_chk                    (1'b0),
-     .dti_qos_rx_tdata_chk                     ({TLP_QOS_TDATA_CHK_WIDTH{1'b1}}),
+     .hls_p_rx_dti_valid                       (hls_ib_posted_dti_valid),
+     .hls_p_rx_dti_cntl                        (hls_ib_posted_dti_cntl),
+     .hls_np_rx_dti_valid                      (hls_ib_nonposted_dti_valid),
+     .hls_np_rx_dti_cntl                       (hls_ib_nonposted_dti_cntl),
 
      .msi_qos_rx_data                          (qos_tx_msi_data),//output wire
      .msi_qos_rx_valid                         (qos_tx_msi_valid),//output wire

@@ -15,15 +15,15 @@ module hls_bridge_qos_dti_pck_enc #(
   /*BSF:doc=HLS metadata width per TLP slot;*/
   parameter HLS_METADATA_WD            = 10,
   /*BSF:doc=Number of supported TLP ID streams;*/
-  parameter NUM_TLP_STREAMS            = 8,
-  /*BSF:doc=Number of QoS counter groups (NUM_TLP_STREAMS x 4: P-REQ, NP-REQ, P-RESP, NP-RESP);*/
-  parameter COUNT_NUMBER               = 32,
-  /*BSF:doc=Channel type: 1=Posted (enables P&REQ + P&RESP), 0=Non-Posted (enables NP&REQ + NP&RESP);*/
+  parameter LBB_NUM_TLP_STREAMS        = 8,
+  /*BSF:doc=Number of QoS counter groups (LBB_NUM_TLP_STREAMS x 2: P, NP);*/
+  parameter COUNT_NUMBER               = 16,
+  /*BSF:doc=Channel type: 1=Posted (enables P group), 0=Non-Posted (enables NP group);*/
   parameter IS_POSTED                  = 1,
 
   localparam METADATA_STREAM_ID_WD     = 3,
   localparam METADATA_STREAM_ID_OFFSET = 48,
-  localparam NUM_TLP_STREAMS_MAX       = 8,
+  localparam LBB_NUM_TLP_STREAMS_MAX   = 8,
   localparam HLS_HAL_STR_PTR_WD        = $clog2(KMAX_DATAPATH_WD/HLS_DW_ALIGNMENT/32),
   localparam HLS_HAL_END_PTR_WD        = $clog2(KMAX_DATAPATH_WD/32),
   localparam HLS_HAL_PKT_CNTL_WD       = KMAX_NUM_TLPS_PER_CLK*(3+HLS_HAL_STR_PTR_WD+HLS_HAL_END_PTR_WD)
@@ -77,7 +77,7 @@ module hls_bridge_qos_dti_pck_enc #(
 
   reg [KMAX_NUM_TLPS_PER_CLK:0]               pck_ended_reg;
 
-  reg [NUM_TLP_STREAMS_MAX-1:0]               qos_stream_en [KMAX_NUM_TLPS_PER_CLK:0];
+  reg [LBB_NUM_TLP_STREAMS_MAX-1:0]           qos_stream_en [KMAX_NUM_TLPS_PER_CLK:0];
   reg [COUNT_NUMBER-1:0]                      dti_num_en    [KMAX_NUM_TLPS_PER_CLK:0];
 
   /////////////////////////////////////////////////////////////////////////////
@@ -164,21 +164,20 @@ module hls_bridge_qos_dti_pck_enc #(
       spilled_pck_next = spilled_pck_reg;
   end
 
-  // Spilled-packet stream ID: latch the stream ID of the spilling SOP
+  // Spilled-packet stream ID: latch on SOP-without-EOP; hold through the EOP
+  // cycle. The previous for-loop wrote stream 0 on every slot that was not the
+  // spilling SOP whenever any EOP was present, so NP group 8 over-counted.
   always @(*) begin : spilled_stream_id
     integer i;
-    for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1) begin
-      if (spilled_pck) begin
+    spilled_pck_stream_id = spilled_pck_stream_id_reg;
+    if (spilled_pck) begin
+      for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1) begin
         if (cntl_sop[i] & ~cntl_eop[i])
           spilled_pck_stream_id = cntl_metadata_stream_id[i];
-        else if (eop_detection)
-          spilled_pck_stream_id = 3'b000;
-        else
-          spilled_pck_stream_id = spilled_pck_stream_id_reg;
       end
-      else
-        spilled_pck_stream_id = 3'b000;
     end
+    else if (!spilled_pck_reg)
+      spilled_pck_stream_id = 3'b000;
   end
 
   // Full-packet stream ID: capture stream ID for slots where SOP and EOP coincide
@@ -203,14 +202,18 @@ module hls_bridge_qos_dti_pck_enc #(
       for (i = 0; i <= KMAX_NUM_TLPS_PER_CLK; i = i + 1)
         dti_stream_reg[i]       <= 3'b000;
     end
-    else if (hls_rx_dti_valid) begin
-      dti_valid                 <= hls_rx_dti_valid;
-      pck_ended_reg             <= pck_ended;
-      spilled_pck_reg           <= spilled_pck_next;
-      spilled_pck_stream_id_reg <= spilled_pck_stream_id;
-      for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1)
-        dti_stream_reg[i]                      <= dti_stream[i];
-      dti_stream_reg[KMAX_NUM_TLPS_PER_CLK]   <= spilled_pck_stream_id;
+    else begin
+      // Pulse: while valid is low the last pck_ended_reg must not keep enabling
+      // stream 0 for extra cycles (that was a sticky +1 on NP group 8).
+      pck_ended_reg <= hls_rx_dti_valid ? pck_ended : {KMAX_NUM_TLPS_PER_CLK+1{1'b0}};
+      if (hls_rx_dti_valid) begin
+        dti_valid                 <= 1'b1;
+        spilled_pck_reg           <= spilled_pck_next;
+        spilled_pck_stream_id_reg <= spilled_pck_stream_id;
+        for (i = 0; i < KMAX_NUM_TLPS_PER_CLK; i = i + 1)
+          dti_stream_reg[i]                    <= dti_stream[i];
+        dti_stream_reg[KMAX_NUM_TLPS_PER_CLK] <= spilled_pck_stream_id;
+      end
     end
   end
 
@@ -236,31 +239,29 @@ module hls_bridge_qos_dti_pck_enc #(
   end
 
   // Counter-group encoding — selected by IS_POSTED at elaboration time.
-  // Bus layout: {NP&RESP[N], P&RESP[N], NP&REQ[N], P&REQ[N]}  (N = NUM_TLP_STREAMS)
+  // Bus layout: {NP[N], P[N]}  (N = LBB_NUM_TLP_STREAMS)
   generate
     if (IS_POSTED) begin : gen_posted_encode
-      // Posted: {NP&RESP{0}, P&RESP{en}, NP&REQ{0}, P&REQ{en}}
+      // Posted: {NP{0}, P{en}}
       always @(*) begin : counter_en_encode
         integer i;
         for (i = 0; i <= KMAX_NUM_TLPS_PER_CLK; i = i + 1) begin
           if (pck_ended_reg[i])
-            dti_num_en[i] = {{NUM_TLP_STREAMS{1'b0}}, qos_stream_en[i][NUM_TLP_STREAMS-1:0],
-                             {NUM_TLP_STREAMS{1'b0}}, qos_stream_en[i][NUM_TLP_STREAMS-1:0]};
+            dti_num_en[i] = {{LBB_NUM_TLP_STREAMS{1'b0}}, qos_stream_en[i][LBB_NUM_TLP_STREAMS-1:0]};
           else
-            dti_num_en[i] = {4*NUM_TLP_STREAMS{1'b0}};
+            dti_num_en[i] = {2*LBB_NUM_TLP_STREAMS{1'b0}};
         end
       end
     end
     else begin : gen_nonposted_encode
-      // Non-Posted: {NP&RESP{en}, P&RESP{0}, NP&REQ{en}, P&REQ{0}}
+      // Non-Posted: {NP{en}, P{0}}
       always @(*) begin : counter_en_encode
         integer i;
         for (i = 0; i <= KMAX_NUM_TLPS_PER_CLK; i = i + 1) begin
           if (pck_ended_reg[i])
-            dti_num_en[i] = {qos_stream_en[i][NUM_TLP_STREAMS-1:0], {NUM_TLP_STREAMS{1'b0}},
-                             qos_stream_en[i][NUM_TLP_STREAMS-1:0], {NUM_TLP_STREAMS{1'b0}}};
+            dti_num_en[i] = {qos_stream_en[i][LBB_NUM_TLP_STREAMS-1:0], {LBB_NUM_TLP_STREAMS{1'b0}}};
           else
-            dti_num_en[i] = {4*NUM_TLP_STREAMS{1'b0}};
+            dti_num_en[i] = {2*LBB_NUM_TLP_STREAMS{1'b0}};
         end
       end
     end
@@ -271,7 +272,7 @@ module hls_bridge_qos_dti_pck_enc #(
   // Transpose and OR with NP path is performed in the parent (hls_bridge_qos).
   generate
     `HLSB_2D_TO_WIDE(dti_num_en_flat, dti_num_en, gen_num_en_flat,
-                     KMAX_NUM_TLPS_PER_CLK+1, COUNT_NUMBER)
+                     (KMAX_NUM_TLPS_PER_CLK+1), COUNT_NUMBER)
   endgenerate
 
   assign dti_num_en_out = dti_num_en_flat;
