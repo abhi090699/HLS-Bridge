@@ -3,6 +3,8 @@
 
 //-----------------------------------------------------------------------------
 // Class: cdn_pcie_hls_bridge_hls_ib_posted_order_checker
+// Checks inbound posted-posted ordering across AXI/DTI/MSI sinks, and reports
+// strict- vs relaxed-order packet timeouts when packets are lost or delayed.
 //-----------------------------------------------------------------------------
 class cdn_pcie_hls_bridge_hls_ib_posted_order_checker extends uvm_component implements I_cdn_pcie_hls_bridge_reset;
   //---------------------------------------------------------------------------
@@ -48,6 +50,45 @@ class cdn_pcie_hls_bridge_hls_ib_posted_order_checker extends uvm_component impl
   //----------------------------------------------------------------------------
   cdn_pcie_hls_bridge_ib_port_tr_delivered_s ib_p_exp_q[$];
 
+  //----------------------------------------------------------------------------
+  // Variable: ib_p_exp_timeout_q
+  // Lockstep metadata for ib_p_exp_q: enqueue time, relaxed vs strict, and
+  // whether a timeout has already been reported for that entry.
+  //----------------------------------------------------------------------------
+  typedef struct {
+    time start_time;
+    bit  is_relaxed;
+    bit  timeout_reported;
+  } ib_p_exp_timeout_s;
+  ib_p_exp_timeout_s ib_p_exp_timeout_q[$];
+
+  //----------------------------------------------------------------------------
+  // Variable: m_exp_is_relaxed_mb
+  // Carries the relaxed-order flag for each expected packet written through
+  // m_in_exp_p_pkt_ended_af so timeout detection can use the correct budget.
+  //----------------------------------------------------------------------------
+  mailbox #(bit) m_exp_is_relaxed_mb;
+
+  //----------------------------------------------------------------------------
+  // Variable: ib_p_q_changed
+  // Event triggered whenever ib_p_exp_q is updated (push/delete/reset).
+  //----------------------------------------------------------------------------
+  event ib_p_q_changed;
+
+  //----------------------------------------------------------------------------
+  // Variable: strict_order_pkt_timeout_us
+  // Timeout (us) for a strict-ordered inbound posted packet to be predicted
+  // or delivered. Override with +IB_POSTED_STRICT_ORDER_TIMEOUT_US=<us>.
+  //----------------------------------------------------------------------------
+  int unsigned strict_order_pkt_timeout_us = 10;
+
+  //----------------------------------------------------------------------------
+  // Variable: relaxed_order_pkt_timeout_us
+  // Timeout (us) for a relaxed-ordered inbound posted packet to be predicted
+  // or delivered. Override with +IB_POSTED_RELAXED_ORDER_TIMEOUT_US=<us>.
+  //----------------------------------------------------------------------------
+  int unsigned relaxed_order_pkt_timeout_us = 10;
+
   //---------------------------------------------------------------------------
   // Coverage Instances.
   //---------------------------------------------------------------------------
@@ -73,6 +114,7 @@ class cdn_pcie_hls_bridge_hls_ib_posted_order_checker extends uvm_component impl
   //---------------------------------------------------------------------------
   function new(string name = "cdn_pcie_hls_bridge_hls_ib_posted_order_checker", uvm_component parent = null);
     super.new(name, parent);
+    m_exp_is_relaxed_mb = new(0);
   endfunction : new
 
   //---------------------------------------------------------------------------
@@ -100,6 +142,17 @@ class cdn_pcie_hls_bridge_hls_ib_posted_order_checker extends uvm_component impl
     foreach(m_in_axi_delivered_count_pkt_ended_af[loop_port])
       m_in_axi_delivered_count_pkt_ended_af[loop_port] = new($sformatf("m_in_axi_delivered_count_pkt_ended_af[%0d]", loop_port), this);
     m_in_dti_delivered_count_pkt_ended_af = new("m_in_dti_delivered_count_pkt_ended_af", this);
+
+    begin
+      uvm_cmdline_processor clp = uvm_cmdline_processor::get_inst();
+      string arg_str;
+      if (clp.get_arg_value("+IB_POSTED_STRICT_ORDER_TIMEOUT_US=", arg_str))
+        strict_order_pkt_timeout_us = arg_str.atoi();
+      if (clp.get_arg_value("+IB_POSTED_RELAXED_ORDER_TIMEOUT_US=", arg_str))
+        relaxed_order_pkt_timeout_us = arg_str.atoi();
+    end
+    void'(uvm_config_db#(int unsigned)::get(this, "", "strict_order_pkt_timeout_us", strict_order_pkt_timeout_us));
+    void'(uvm_config_db#(int unsigned)::get(this, "", "relaxed_order_pkt_timeout_us", relaxed_order_pkt_timeout_us));
     
     //-- Coverage creation --------------------
     cg_disable_p_p_order_check_h = new(.cg_name("cg_disable_p_p_order_check_h"));
@@ -113,6 +166,7 @@ class cdn_pcie_hls_bridge_hls_ib_posted_order_checker extends uvm_component impl
     super.main_phase(phase);
     
     `uvm_info(l_msg_id, "Starting HLS Bridge IB Posted Order Checker Main Phase...", UVM_LOW);
+    `uvm_info(l_msg_id, $sformatf("Posted packet timeout budgets: strict=%0d us, relaxed=%0d us", strict_order_pkt_timeout_us, relaxed_order_pkt_timeout_us), UVM_LOW);
     
     fork
       for (int loop_port = 0; loop_port < parameters_cfg_pkg::NUM_HLS_PORTS; loop_port++) begin
@@ -126,6 +180,7 @@ class cdn_pcie_hls_bridge_hls_ib_posted_order_checker extends uvm_component impl
       process_act_p_dti_pkt_ended(.msg_id(l_msg_id));
       process_act_p_msi_pkt_ended(.msg_id(l_msg_id));
       process_dti_delivered_count_pkt_ended(.msg_id(l_msg_id));
+      process_undelivered_pkt_timeout(.msg_id(l_msg_id));
     join
 
     `uvm_info(l_msg_id, "Ending HLS Bridge IB Posted Order Checker Main Phase...", UVM_LOW);
@@ -152,7 +207,7 @@ class cdn_pcie_hls_bridge_hls_ib_posted_order_checker extends uvm_component impl
     
     //---- local Variables Clear -----------------
     ib_p_exp_q = {};
-
+    ib_p_exp_timeout_q = {};
     //---- Analysis FIFO Flush ------------------
     m_in_exp_p_pkt_ended_af.flush();
     foreach(m_in_act_p_axi_cxs_pkt_ended_af[loop_port])
@@ -162,6 +217,11 @@ class cdn_pcie_hls_bridge_hls_ib_posted_order_checker extends uvm_component impl
     foreach(m_in_axi_delivered_count_pkt_ended_af[loop_port])
       m_in_axi_delivered_count_pkt_ended_af[loop_port].flush();
     m_in_dti_delivered_count_pkt_ended_af.flush();
+    begin
+      bit dummy_relaxed;
+      while (m_exp_is_relaxed_mb.try_get(dummy_relaxed));
+    end
+    ->> ib_p_q_changed;
 
     `uvm_info("PERFORM_RESET", $sformatf("Completed resetting cdn_pcie_hls_bridge_hls_ib_posted_order_checker(%0s) component.....", get_full_name()), UVM_DEBUG)
   endtask : perform_reset
@@ -181,10 +241,13 @@ class cdn_pcie_hls_bridge_hls_ib_posted_order_checker extends uvm_component impl
   task process_exp_p_pkt_ended(string msg_id = "");
     string                                     l_msg_id = {msg_id, "[process_exp_p_pkt_ended]"} ;
     cdn_pcie_hls_bridge_ib_port_tr_delivered_s port_tr                                          ;
+    bit                                        is_relaxed                                       ;
+    ib_p_exp_timeout_s                         timeout_info                                     ;
     
     forever begin
       // -- Get pkt ---------------------------------------
       m_in_exp_p_pkt_ended_af.get(port_tr);
+      m_exp_is_relaxed_mb.get(is_relaxed);
 
       if (port_tr.dest_port == ROUTE_TO_AXI && hls_bridge_regmodel.hls_bridge_regs_memory_map_wrapper_hls_bridge_regs.hls_bridge_dbg_order.dbg_dis_per_port_o_chk.get_mirrored_value())
         continue;
@@ -196,7 +259,12 @@ class cdn_pcie_hls_bridge_hls_ib_posted_order_checker extends uvm_component impl
         continue;
 
       // -- Push it in the queue --------------------------
+      timeout_info.start_time        = $time;
+      timeout_info.is_relaxed        = is_relaxed;
+      timeout_info.timeout_reported  = 0;
       ib_p_exp_q.push_back(port_tr);
+      ib_p_exp_timeout_q.push_back(timeout_info);
+      ->> ib_p_q_changed;
 
       print_table(.msg_id(l_msg_id), .msg(""), .arg_table(ib_p_exp_q));
     end
@@ -220,12 +288,15 @@ class cdn_pcie_hls_bridge_hls_ib_posted_order_checker extends uvm_component impl
       
       m_env_cfg.m_misc_if_api.get_misc_hls_bridge_route_en(l_route_en);
 
-      // do not wait for packet if relax order enabled
+      // Wait for the expected packet to be queued. Relaxed-order uses its own
+      // timeout budget so RO/TC/VC traffic does not share the strict-order wait.
       disable_ordering = l_hls_ib_p_np_meta_s.ro || l_route_en.ro_en || l_route_en.vc_en || l_route_en.tc_en;
 
       `uvm_info(get_type_name(), $sformatf("AXI ordering_disabled %0h", disable_ordering), UVM_LOW)
       `uvm_info(get_type_name(), $sformatf("HLS bridge route en: l_hls_ib_p_np_meta_s.ro %p", l_hls_ib_p_np_meta_s.ro), UVM_LOW)
       `uvm_info(get_type_name(), $sformatf("HLS bridge route en: l_route_en %p", l_route_en), UVM_LOW)
+
+      wait_for_exp_pkt(.msg_id(l_msg_id), .route_to(ROUTE_TO_AXI), .hls_port_num(port_num), .data_bytes(cxs_pkt.DataPerPktRx), .id_group(l_hls_ib_p_np_meta_s.idgroup), .is_relaxed(disable_ordering));
 
       // -- Check the ordering as soon as actual packet is received ------
       check_p_p_ordering(.msg_id(l_msg_id), .route_to(ROUTE_TO_AXI), .hls_port_num(port_num), .data_bytes(cxs_pkt.DataPerPktRx), .disable_checking(disable_ordering), .id_group(l_hls_ib_p_np_meta_s.idgroup));
@@ -247,6 +318,8 @@ class cdn_pcie_hls_bridge_hls_ib_posted_order_checker extends uvm_component impl
 
       l_hls_ib_p_np_meta_s = {<<byte{cxs_pkt.UserControl}};
 
+      wait_for_exp_pkt(.msg_id(l_msg_id), .route_to(ROUTE_TO_DTI), .hls_port_num(0), .data_bytes(cxs_pkt.DataPerPktRx), .id_group(l_hls_ib_p_np_meta_s.idgroup), .is_relaxed(1'b0));
+
       // -- Check the ordering as soon as actual packet is received ------
       check_p_p_ordering(.msg_id(l_msg_id), .route_to(ROUTE_TO_DTI), .hls_port_num(0), .data_bytes(cxs_pkt.DataPerPktRx), .disable_checking(1'b0), .id_group(l_hls_ib_p_np_meta_s.idgroup));
     end
@@ -265,6 +338,8 @@ class cdn_pcie_hls_bridge_hls_ib_posted_order_checker extends uvm_component impl
       // -- Get pkt ---------------------------------------
       m_in_act_p_msi_pkt_ended_af.get(msi_pkt);
 
+      wait_for_exp_pkt(.msg_id(l_msg_id), .route_to(ROUTE_TO_MSI), .hls_port_num(0), .data_bytes(msi_pkt.PacketData), .id_group(3'h0), .is_relaxed(1'b0), .match_any_id_group(1'b1));
+
       // -- Check the ordering as soon as actual packet is received ------
       foreach(ib_p_exp_q[i]) begin
         if(ib_p_exp_q[i].dest_port == ROUTE_TO_MSI && compare_pkt_data_bytes(.lhs(ib_p_exp_q[i].data_bytes), .rhs(msi_pkt.PacketData))) begin
@@ -278,7 +353,7 @@ class cdn_pcie_hls_bridge_hls_ib_posted_order_checker extends uvm_component impl
       foreach(ib_p_exp_q[i]) begin
         if(ib_p_exp_q[i].dest_port == ROUTE_TO_MSI && compare_pkt_data_bytes(.lhs(ib_p_exp_q[i].data_bytes), .rhs(msi_pkt.PacketData))) begin
           id_group = ib_p_exp_q[i].id_group;
-          ib_p_exp_q.delete(i);
+          delete_exp_entry(i);
           break;
         end
       end
@@ -349,7 +424,7 @@ class cdn_pcie_hls_bridge_hls_ib_posted_order_checker extends uvm_component impl
         break;
 
       if(ib_p_exp_q[i].dest_port == intf_name && ib_p_exp_q[i].hls_port_num == port_num && ib_p_exp_q[i].id_group == id_group) begin
-        ib_p_exp_q.delete(i);
+        delete_exp_entry(i);
         exp_delivered_count++;
         i = 0;
       end
@@ -375,6 +450,148 @@ class cdn_pcie_hls_bridge_hls_ib_posted_order_checker extends uvm_component impl
     end
 
   endtask : handle_delivered_count
+
+  //----------------------------------------------------------------------------
+  // Function: push_exp_is_relaxed
+  // Called by the monitor in lockstep with hls_ib_posted_port_tr_ap.write()
+  // so timeout detection knows whether the expected packet is relaxed-order.
+  //----------------------------------------------------------------------------
+  virtual function void push_exp_is_relaxed(bit is_relaxed);
+    if (!m_exp_is_relaxed_mb.try_put(is_relaxed))
+      `uvm_error({component_msg_id, "_ERROR"}, "Failed to queue relaxed-order timeout metadata for an expected inbound posted packet.")
+  endfunction : push_exp_is_relaxed
+
+  //----------------------------------------------------------------------------
+  // Function: delete_exp_entry
+  // Deletes index i from the expected packet queue and its timeout metadata.
+  //----------------------------------------------------------------------------
+  virtual function void delete_exp_entry(int unsigned idx);
+    if (idx < ib_p_exp_q.size())
+      ib_p_exp_q.delete(idx);
+    if (idx < ib_p_exp_timeout_q.size())
+      ib_p_exp_timeout_q.delete(idx);
+    ->> ib_p_q_changed;
+  endfunction : delete_exp_entry
+
+  //----------------------------------------------------------------------------
+  // Function: is_exp_pkt_present
+  // Returns 1 when a matching expected posted packet is in ib_p_exp_q.
+  //----------------------------------------------------------------------------
+  virtual function bit is_exp_pkt_present(cdn_pcie_hls_bridge_inbound_route_to_e route_to, int unsigned hls_port_num, bit [7:0] data_bytes[], bit[2:0] id_group, bit match_any_id_group = 0);
+    foreach(ib_p_exp_q[i]) begin
+      if (ib_p_exp_q[i].dest_port == route_to &&
+          ib_p_exp_q[i].hls_port_num == hls_port_num &&
+          (match_any_id_group || ib_p_exp_q[i].id_group == id_group) &&
+          compare_pkt_data_bytes(.lhs(ib_p_exp_q[i].data_bytes), .rhs(data_bytes)))
+        return 1;
+    end
+    return 0;
+  endfunction : is_exp_pkt_present
+
+  //----------------------------------------------------------------------------
+  // Function: get_pkt_timeout_us
+  // Selects the strict or relaxed timeout budget.
+  //----------------------------------------------------------------------------
+  virtual function int unsigned get_pkt_timeout_us(bit is_relaxed);
+    return (is_relaxed ? relaxed_order_pkt_timeout_us : strict_order_pkt_timeout_us);
+  endfunction : get_pkt_timeout_us
+
+  //----------------------------------------------------------------------------
+  // Task: wait_for_exp_pkt
+  // Waits until the matching expected packet is queued, or until the
+  // strict/relaxed timeout expires. Improves debug visibility when the
+  // actual packet arrives but the expected entry is missing (lost or late).
+  //----------------------------------------------------------------------------
+  virtual task wait_for_exp_pkt(string msg_id = "", cdn_pcie_hls_bridge_inbound_route_to_e route_to, int unsigned hls_port_num, bit [7:0] data_bytes[], bit[2:0] id_group, bit is_relaxed, bit match_any_id_group = 0);
+    string       l_msg_id    = {msg_id, "[wait_for_exp_pkt]"};
+    string       order_s     = is_relaxed ? "Relaxed" : "Strict";
+    int unsigned timeout_us  = get_pkt_timeout_us(is_relaxed);
+    bit          timed_out   = 0;
+    bit          found       = 0;
+
+    found = is_exp_pkt_present(.route_to(route_to), .hls_port_num(hls_port_num), .data_bytes(data_bytes), .id_group(id_group), .match_any_id_group(match_any_id_group));
+    if (found)
+      return;
+
+    if ((route_to == ROUTE_TO_AXI && hls_bridge_regmodel.hls_bridge_regs_memory_map_wrapper_hls_bridge_regs.hls_bridge_dbg_order.dbg_dis_per_port_o_chk.get_mirrored_value()) ||
+        (route_to == ROUTE_TO_DTI && hls_bridge_regmodel.hls_bridge_regs_memory_map_wrapper_hls_bridge_regs.hls_bridge_dbg_order.dbg_dis_o_chk_dti.get_mirrored_value()) ||
+        (route_to == ROUTE_TO_MSI && hls_bridge_regmodel.hls_bridge_regs_memory_map_wrapper_hls_bridge_regs.hls_bridge_dbg_order.dbg_dis_o_chk_msi.get_mirrored_value()))
+      return;
+
+    if (timeout_us == 0)
+      return;
+
+    fork begin : wait_exp_pkt_guard
+      fork
+        begin
+          while (!is_exp_pkt_present(.route_to(route_to), .hls_port_num(hls_port_num), .data_bytes(data_bytes), .id_group(id_group), .match_any_id_group(match_any_id_group)))
+            @(ib_p_q_changed);
+          found = 1;
+        end
+        begin
+          m_env_cfg.m_hpa_timer.wait_for_time(timeout_us, {order_s, "-order IB posted packet timeout"}, "us");
+          timed_out = 1;
+        end
+      join_any
+      disable fork;
+    end join
+
+    found = is_exp_pkt_present(.route_to(route_to), .hls_port_num(hls_port_num), .data_bytes(data_bytes), .id_group(id_group), .match_any_id_group(match_any_id_group));
+
+    if (timed_out && !found && checks_enable == 1) begin
+      `uvm_error({component_msg_id, "_TIMEOUT"}, $sformatf("%0s-order inbound posted packet timeout after %0d us waiting for expected entry. Packet may be lost or excessively delayed. dest=%0s hls_port=%0d id_group=%0d", order_s, timeout_us, route_to.name(), hls_port_num, id_group))
+      print_table(.msg_id(l_msg_id), .msg("Expected posted queue at timeout:"), .arg_table(ib_p_exp_q));
+    end
+  endtask : wait_for_exp_pkt
+
+  //----------------------------------------------------------------------------
+  // Task: process_undelivered_pkt_timeout
+  // Watches expected posted packets that remain in ib_p_exp_q too long
+  // (never delivered / DC never observed).
+  //----------------------------------------------------------------------------
+  virtual task process_undelivered_pkt_timeout(string msg_id = "");
+    string l_msg_id = {msg_id, "[process_undelivered_pkt_timeout]"};
+    forever begin
+      m_env_cfg.m_misc_if_api.wait_cb();
+      check_undelivered_pkt_timeouts(.msg_id(l_msg_id));
+    end
+  endtask : process_undelivered_pkt_timeout
+
+  //----------------------------------------------------------------------------
+  // Function: check_undelivered_pkt_timeouts
+  // Reports one timeout per expected entry when its age exceeds the
+  // strict- or relaxed-order budget.
+  //----------------------------------------------------------------------------
+  virtual function void check_undelivered_pkt_timeouts(string msg_id = "");
+    time         age;
+    int unsigned timeout_us;
+    string       order_s;
+
+    if (ib_p_exp_q.size() != ib_p_exp_timeout_q.size()) begin
+      if (checks_enable == 1)
+        `uvm_error({component_msg_id, "_ERROR"}, $sformatf("Expected posted queue and timeout metadata are out of sync (exp=%0d timeout=%0d).", ib_p_exp_q.size(), ib_p_exp_timeout_q.size()))
+      return;
+    end
+
+    foreach (ib_p_exp_timeout_q[i]) begin
+      if (ib_p_exp_timeout_q[i].timeout_reported)
+        continue;
+
+      timeout_us = get_pkt_timeout_us(ib_p_exp_timeout_q[i].is_relaxed);
+      if (timeout_us == 0)
+        continue;
+
+      age = $time - ib_p_exp_timeout_q[i].start_time;
+      if (age >= (timeout_us * 1us)) begin
+        ib_p_exp_timeout_q[i].timeout_reported = 1;
+        order_s = ib_p_exp_timeout_q[i].is_relaxed ? "Relaxed" : "Strict";
+        if (checks_enable == 1) begin
+          print_row(.msg_id(msg_id), .msg($sformatf("%0s-order inbound posted packet timed out after %0t (budget %0d us). Packet may be lost or excessively delayed:", order_s, age, timeout_us)), .row(ib_p_exp_q[i]));
+          `uvm_error({component_msg_id, "_TIMEOUT"}, $sformatf("%0s-order inbound posted packet timeout after %0t. dest=%0s hls_port=%0d id_group=%0d. Packet may be lost or excessively delayed.", order_s, age, ib_p_exp_q[i].dest_port.name(), ib_p_exp_q[i].hls_port_num, ib_p_exp_q[i].id_group))
+        end
+      end
+    end
+  endfunction : check_undelivered_pkt_timeouts
 
   //----------------------------------------------------------------------------
   // Task: check_p_p_ordering

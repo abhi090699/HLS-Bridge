@@ -3346,6 +3346,9 @@ endfunction
   //----------------------------------------------------------------------------
   virtual task send_to_ib_posted_order_checker(cdn_pcie_hls_bridge_inbound_route_to_e route_to, int unsigned hls_port_num, denaliCxsTransaction cxs_pkt, denaliStreamTransaction msi_pkt, bit[2:0] id_group);
     cdn_pcie_hls_bridge_ib_port_tr_delivered_s port_tr;
+    cdn_pcie_hls_ib_p_np_metadata_s            l_hls_ib_p_np_meta_s;
+    cdn_pcie_hls_bridge_route_en_s             l_route_en;
+    bit                                        is_relaxed = 0;
     
     port_tr.dest_port    = route_to;
     port_tr.id_group     = id_group;
@@ -3360,7 +3363,14 @@ endfunction
     else
       port_tr.data_bytes = new[cxs_pkt.DataPerPktRx.size()](cxs_pkt.DataPerPktRx);
 
-    hls_ib_posted_port_tr_ap.write(port_tr); 
+    if (route_to == ROUTE_TO_AXI && cxs_pkt != null) begin
+      l_hls_ib_p_np_meta_s = {<<byte{cxs_pkt.UserControl}};
+      m_env_cfg.m_misc_if_api.get_misc_hls_bridge_route_en(l_route_en);
+      is_relaxed = l_hls_ib_p_np_meta_s.ro || l_route_en.ro_en || l_route_en.vc_en || l_route_en.tc_en;
+    end
+
+    hls_ib_posted_port_tr_ap.write(port_tr);
+    m_hls_ib_posted_order_checker.push_exp_is_relaxed(is_relaxed);
 
   endtask : send_to_ib_posted_order_checker
 
