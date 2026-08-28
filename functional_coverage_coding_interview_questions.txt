@@ -1,0 +1,722 @@
+================================================================================
+Functional Coverage - Coding-Based Interview Questions
+Topics: Covergroups, Coverpoints, Bins, Cross Coverage, iff, binsof, intersect,
+        ignore_bins, illegal_bins, Transition bins, Common mistakes
+================================================================================
+
+================================================================================
+SET 1 - WRITE THE COVERGROUP
+================================================================================
+
+--------------------------------------------------------------------------------
+Q1. Basic coverpoints + cross
+--------------------------------------------------------------------------------
+Signals: bit [1:0] mode; bit [2:0] cmd; bit clk, valid;
+
+Requirements:
+- Cover all mode values
+- Cover cmd in bins: {0}, {1,2}, {[3:5]}, {6,7}
+- Sample only when valid==1
+- Cross mode x cmd
+- Ignore cross of mode==3 with cmd in {6,7}
+
+SOLUTION:
+--------
+covergroup cg_q1 @(posedge clk);
+  option.per_instance = 1;
+
+  cp_mode: coverpoint mode iff (valid) {
+    bins m[] = {[0:3]};
+  }
+
+  cp_cmd: coverpoint cmd iff (valid) {
+    bins c0   = {0};
+    bins c12  = {1,2};
+    bins c35  = {[3:5]};
+    bins c67  = {6,7};
+  }
+
+  cx: cross cp_mode, cp_cmd iff (valid) {
+    ignore_bins m3_c67 =
+      binsof(cp_mode) intersect {3} &&
+      binsof(cp_cmd.c67);
+  }
+endgroup
+
+
+--------------------------------------------------------------------------------
+Q2. iff vs boolean expression (fix the bug)
+--------------------------------------------------------------------------------
+covergroup cg @(posedge clk);
+  cp: coverpoint (addr && en);      // want: cover addr while en=1
+  cp_data: coverpoint data;
+  cx: cross cp, cp_data;
+endgroup
+
+Rewrite correctly.
+
+SOLUTION:
+--------
+covergroup cg @(posedge clk);
+  cp_addr: coverpoint addr iff (en);
+  cp_data: coverpoint data iff (en);
+  cx: cross cp_addr, cp_data iff (en);
+endgroup
+
+NOTE: (addr && en) samples a 1-bit boolean, NOT address values.
+
+
+--------------------------------------------------------------------------------
+Q3. Manual sample() in a monitor
+--------------------------------------------------------------------------------
+Transaction has addr, data, write. Sample on each observed txn (no clock in CG).
+
+SOLUTION:
+--------
+class axi_cov;
+  bit [31:0] addr, data;
+  bit        write;
+
+  covergroup cg;
+    cp_dir: coverpoint write { bins rd = {0}; bins wr = {1}; }
+    cp_addr: coverpoint addr {
+      bins low  = {[32'h0000_0000:32'h0000_FFFF]};
+      bins mid  = {[32'h0001_0000:32'h7FFF_FFFF]};
+      bins high = {[32'h8000_0000:32'hFFFF_FFFF]};
+    }
+    cx: cross cp_dir, cp_addr;
+  endgroup
+
+  function new();
+    cg = new();
+  endfunction
+
+  function void sample_txn(bit [31:0] a, bit [31:0] d, bit w);
+    addr  = a;
+    data  = d;
+    write = w;
+    cg.sample();
+  endfunction
+endclass
+
+
+================================================================================
+SET 2 - PREDICT HITS / COUNTS
+================================================================================
+
+--------------------------------------------------------------------------------
+Q4. What gets hit?
+--------------------------------------------------------------------------------
+bit [7:0] a, b;
+covergroup cg;
+  cp1: coverpoint a {
+    bins x1 = {[0:99]};
+    bins x2 = {[100:199]};
+    bins x3 = {[200:255]};
+  }
+  cp2: coverpoint b {
+    bins y1 = {[0:74]};
+    bins y2 = {[75:149]};
+    bins y3 = {[150:255]};
+  }
+  cx: cross cp1, cp2 {
+    bins xy1 = binsof(cp1.x1);
+    bins xy2 = binsof(cp2.y2);
+    bins xy3 = binsof(cp1.x1) && binsof(cp2.y2);
+    bins xy4 = binsof(cp1.x1) || binsof(cp2.y2);
+  }
+endgroup
+
+For (a,b) = (50,100), list named cross bins that increment.
+
+ANSWER:
+------
+xy1, xy2, xy3, xy4  (product <x1,y2>)
+
+Reference - how many products each named bin selects:
+  xy1 = binsof(cp1.x1)                         -> 3 products
+  xy2 = binsof(cp2.y2)                         -> 3 products
+  xy3 = binsof(cp1.x1) && binsof(cp2.y2)       -> 1 product
+  xy4 = binsof(cp1.x1) || binsof(cp2.y2)       -> 5 products (not 6)
+
+
+--------------------------------------------------------------------------------
+Q5. Write code + compute size
+--------------------------------------------------------------------------------
+Using same cp1/cp2 as Q4, write a cross bin that selects only products where
+cp1 intersects [100:200] and cp2 is y1. How many underlying products?
+
+SOLUTION:
+--------
+bins sel = binsof(cp1) intersect {[100:200]} && binsof(cp2.y1);
+
+cp1 bins intersecting [100:200]: x2, x3
+-> 2 products: <x2,y1>, <x3,y1>
+
+
+--------------------------------------------------------------------------------
+Q6. Complementary ignore trap - fix it
+--------------------------------------------------------------------------------
+cx: cross cp1, cp2 {
+  ignore_bins i1 = binsof(cp1) intersect {[100:200]};
+  ignore_bins i2 = !binsof(cp1) intersect {[100:200]};
+}
+
+This ignores everything. Keep only ignoring x2/x3 combinations with y3.
+
+SOLUTION:
+--------
+cx: cross cp1, cp2 {
+  ignore_bins hi_y3 =
+    binsof(cp1) intersect {[100:200]} &&
+    binsof(cp2.y3);
+}
+// Ignores <x2,y3>, <x3,y3> only (2 products)
+
+
+================================================================================
+SET 3 - ALL BIN TYPES (WRITE CODE)
+================================================================================
+
+--------------------------------------------------------------------------------
+Q7. Array bins
+--------------------------------------------------------------------------------
+bit [7:0] data
+- 4 equal bins over 0-255 (excluding specials below as appropriate)
+- Separate bin for 8'hFF
+- Ignore 8'h00
+
+SOLUTION:
+--------
+coverpoint data {
+  ignore_bins zero = {8'h00};
+  bins top = {8'hFF};
+  bins rest[4] = {[8'h01:8'hFE]};
+}
+
+
+--------------------------------------------------------------------------------
+Q8. Wildcard
+--------------------------------------------------------------------------------
+Cover any byte with upper nibble 4'hA in one bin.
+
+SOLUTION:
+--------
+wildcard bins hi_a = {8'b1010????};
+
+// Cleaner alternative often preferred:
+coverpoint data[7:4] {
+  bins nibble_a = {4'hA};
+}
+
+
+--------------------------------------------------------------------------------
+Q9. Transition bins - FSM
+--------------------------------------------------------------------------------
+States: IDLE=0, REQ=1, WAIT=2, DONE=3
+
+Cover:
+1. IDLE => REQ => DONE
+2. IDLE => REQ => WAIT => DONE
+3. Illegal direct IDLE => DONE
+4. Any other transition via default sequence (optional)
+
+SOLUTION:
+--------
+coverpoint state {
+  bins s[] = {IDLE, REQ, WAIT, DONE};
+
+  bins happy   = (IDLE => REQ => DONE);
+  bins stalled = (IDLE => REQ => WAIT => DONE);
+
+  illegal_bins jump = (IDLE => DONE);
+
+  bins others = default sequence;
+}
+
+
+--------------------------------------------------------------------------------
+Q10. Repeat / consecutive
+--------------------------------------------------------------------------------
+Cover sequence: see 0, then 1 exactly 3 times, then 2.
+
+SOLUTION:
+--------
+coverpoint val {
+  bins seq = (0 => 1[*3] => 2);  // samples: 0,1,1,1,2
+}
+
+Transition operator quick reference:
+  1[*3]     -> 1,1,1 consecutive
+  1[*2:4]   -> 1 repeated 2-4 times
+  1[+]      -> 1 repeated 1+ times
+  1[->3]    -> non-consecutive goto: value 1 occurs 3 times
+  1[=3]     -> non-consecutive repeat of 1 three times
+
+
+--------------------------------------------------------------------------------
+Q11. at_least coding
+--------------------------------------------------------------------------------
+Bin error must be seen >= 5 times to count covered.
+
+SOLUTION:
+--------
+covergroup cg;
+  option.at_least = 5;
+  cp: coverpoint status {
+    bins ok = {0};
+    bins error = {1};
+  }
+endgroup
+
+
+================================================================================
+SET 4 - DEBUG / FIX BROKEN COVERAGE CODE
+================================================================================
+
+--------------------------------------------------------------------------------
+Q12. Why is coverage always 0?
+--------------------------------------------------------------------------------
+logic [3:0] addr;
+logic reset_n, clk;
+
+covergroup cg @(posedge clk);
+  cp: coverpoint addr iff (!reset_n);
+endgroup
+
+// test drives addr only when reset_n == 1
+
+FIX:
+----
+iff (reset_n)   // sample during normal operation after reset release
+// Original sampled only while reset was asserted.
+
+
+--------------------------------------------------------------------------------
+Q13. Why cross never rises though CPs are 100%?
+--------------------------------------------------------------------------------
+covergroup cg;
+  cp_a: coverpoint a { bins a0={0}; bins a1={1}; }
+  cp_b: coverpoint b { bins b0={0}; bins b1={1}; }
+  cx: cross cp_a, cp_b;
+endgroup
+
+// Stimulus: always a==b (only 00 and 11)
+
+ANSWER:
+------
+Holes at <a0,b1> and <a1,b0>. Fix stimulus/constraints, not the cover.
+
+Constraint that can hit all 4:
+  constraint c_all { a inside {0,1}; b inside {0,1}; } // independent
+Bad:
+  constraint c { b == a; }
+
+
+--------------------------------------------------------------------------------
+Q14. Compile/semantic issue
+--------------------------------------------------------------------------------
+covergroup cg1;
+  cp: coverpoint x { bins b = {[0:3]}; }
+endgroup
+covergroup cg2;
+  cp: coverpoint y { bins b = {[0:3]}; }
+  bad: cross cg1.cp, cp;   // ??
+endgroup
+
+ANSWER:
+------
+Illegal - cross operands must be in the SAME covergroup. Merge into one CG.
+
+
+--------------------------------------------------------------------------------
+Q15. Over-auto-bin explosion - refactor
+--------------------------------------------------------------------------------
+coverpoint addr; // bit [31:0]
+coverpoint data; // bit [31:0]
+cross addr, data;
+
+Rewrite with meaningful bins + one sensible cross.
+
+SOLUTION:
+--------
+cp_addr: coverpoint addr {
+  bins stack = {[32'h0000_0000:32'h0000_FFFF]};
+  bins heap  = {[32'h1000_0000:32'h1FFF_FFFF]};
+  bins mmio  = {[32'hA000_0000:32'hA000_FFFF]};
+  bins rest  = default;
+}
+cp_data: coverpoint data {
+  bins zero = {0};
+  bins all1 = {32'hFFFF_FFFF};
+  bins other[4] = {[1:32'hFFFF_FFFE]};
+}
+cx: cross cp_addr, cp_data {
+  ignore_bins mmio_all1 =
+    binsof(cp_addr.mmio) && binsof(cp_data.all1);
+}
+
+
+================================================================================
+SET 5 - binsof / intersect CODING DRILLS
+================================================================================
+
+--------------------------------------------------------------------------------
+Q16. Fill in the blanks
+--------------------------------------------------------------------------------
+typedef enum {FIXED, INCR, WRAP} burst_e;
+burst_e burst;
+bit [3:0] len; // 0..15 means 1..16 beats
+
+covergroup cg;
+  cp_b: coverpoint burst {
+    bins fixed = {FIXED};
+    bins incr  = {INCR};
+    bins wrap  = {WRAP};
+  }
+  cp_l: coverpoint len {
+    bins single = {0};
+    bins short  = {[1:3]};
+    bins mid    = {[4:7]};
+    bins long   = {[8:15]};
+  }
+
+  cx: cross cp_b, cp_l {
+    // TODO: illegal WRAP with single-beat
+    illegal_bins wrap_single = ____________;
+
+    // TODO: ignore FIXED with long
+    ignore_bins fixed_long = ____________;
+
+    // TODO: named bin: INCR and (short or mid)
+    bins incr_sm = ____________;
+  }
+endgroup
+
+SOLUTION:
+--------
+illegal_bins wrap_single =
+  binsof(cp_b.wrap) && binsof(cp_l.single);
+
+ignore_bins fixed_long =
+  binsof(cp_b.fixed) && binsof(cp_l.long);
+
+bins incr_sm =
+  binsof(cp_b.incr) &&
+  (binsof(cp_l.short) || binsof(cp_l.mid));
+
+
+--------------------------------------------------------------------------------
+Q17. Intersect coding
+--------------------------------------------------------------------------------
+bit [7:0] len;
+bins L0={[0:3]}, L1={[4:10]}, L2={[11:255]}
+
+Select cross products whose len bins intersect {3,4,11} - write bins line
+and list which L* bins match.
+
+SOLUTION:
+--------
+bins hit = binsof(cp_len) intersect {3,4,11};
+
+Matches L0 (3), L1 (4), L2 (11) -> all three x whatever other CP bins.
+
+NOTE: intersect selects bins whose DEFINITIONS overlap the set, not only
+      if today's sample is in that set. Whole matching bins participate.
+
+
+--------------------------------------------------------------------------------
+Q18. Negation
+--------------------------------------------------------------------------------
+Using Q4 bins, write ignore for all products NOT involving x1.
+
+SOLUTION:
+--------
+ignore_bins not_x1 = !binsof(cp1.x1);
+// or: !binsof(cp1) intersect {[0:99]};  // same if x1 is exactly 0:99
+// Ignores 6 products (x2/*, x3/*)
+
+
+================================================================================
+SET 6 - END-TO-END MINI PROBLEMS
+================================================================================
+
+--------------------------------------------------------------------------------
+Q19. AXI-ish coverage class
+--------------------------------------------------------------------------------
+Implement a covergroup for:
+- dir: read/write
+- burst: FIXED/INCR/WRAP
+- ost_lvl: outstanding 1 / 2-4 / 5-8 / 9+
+- Cross all three
+- Illegal: FIXED & ost 9+
+- Sample via function
+
+SOLUTION:
+--------
+class axi_fcov;
+  bit        is_write;
+  bit [1:0]  burst;   // 0 fixed,1 incr,2 wrap
+  int unsigned ost;
+
+  covergroup cg;
+    cp_dir: coverpoint is_write {
+      bins rd={0}; bins wr={1};
+    }
+    cp_burst: coverpoint burst {
+      bins fixed={0}; bins incr={1}; bins wrap={2};
+    }
+    cp_ost: coverpoint ost {
+      bins o1   = {1};
+      bins o24  = {[2:4]};
+      bins o58  = {[5:8]};
+      bins o9p  = {[9:$]};
+    }
+    cx: cross cp_dir, cp_burst, cp_ost {
+      illegal_bins fixed_deep =
+        binsof(cp_burst.fixed) && binsof(cp_ost.o9p);
+    }
+  endgroup
+
+  function new(); cg = new(); endfunction
+
+  function void sample(bit w, bit [1:0] b, int unsigned o);
+    is_write = w; burst = b; ost = o;
+    cg.sample();
+  endfunction
+endclass
+
+
+--------------------------------------------------------------------------------
+Q20. Given a sample trace, mark hits
+--------------------------------------------------------------------------------
+coverpoint st {
+  bins rise = (0 => 1);
+  bins fall = (1 => 0);
+  bins sticky1 = (1[*3]);
+}
+
+Samples in order: 0, 1, 1, 1, 0, 1
+
+Which bins hit, and when?
+
+ANSWER:
+------
+rise:    between sample1->2 (0=>1), and sample5->6 (0=>1)
+sticky1: samples 2-4 (1,1,1)
+fall:    sample4->5 (1=>0)
+
+
+--------------------------------------------------------------------------------
+Q21. Write a self-checking snippet
+--------------------------------------------------------------------------------
+Create CG, sample a list, display coverage %.
+
+SOLUTION:
+--------
+module tb;
+  bit [1:0] m;
+  covergroup cg;
+    cp: coverpoint m { bins b[] = {[0:3]}; }
+  endgroup
+
+  cg c = new();
+
+  initial begin
+    for (int i = 0; i <= 2; i++) begin
+      m = i; // 0,1,2 only
+      c.sample();
+    end
+    $display("Coverage = %0.2f%%", c.get_inst_coverage());
+    // Expect < 100 because bin 3 missing
+  end
+endmodule
+
+
+--------------------------------------------------------------------------------
+Q22. Coding + follow-ups on this code
+--------------------------------------------------------------------------------
+covergroup cg @(posedge clk);
+  cp: coverpoint {write, size} {
+    bins w_byte  = {3'b1_00};
+    bins w_word  = {3'b1_10};
+    bins r_byte  = {3'b0_00};
+    ignore_bins r_word = {3'b0_10};
+  }
+endgroup
+
+Tasks:
+1. What is concatenated width?
+2. Add illegal write && size==3.
+3. Convert to two coverpoints + cross with same intent.
+
+ANSWERS:
+-------
+1. {write,size} with size[1:0] -> 3-bit vector.
+2. illegal_bins bad = {3'b1_11};
+3.
+cp_w: coverpoint write { bins rd={0}; bins wr={1}; }
+cp_s: coverpoint size  { bins byte={0}; bins word={2}; bins s3={3}; }
+cx: cross cp_w, cp_s {
+  ignore_bins r_word = binsof(cp_w.rd) && binsof(cp_s.word);
+  illegal_bins w_s3  = binsof(cp_w.wr) && binsof(cp_s.s3);
+}
+
+
+================================================================================
+SET 7 - RAPID-FIRE / SHORT CODING
+================================================================================
+
+--------------------------------------------------------------------------------
+Q23. Enum coding
+--------------------------------------------------------------------------------
+typedef enum logic [2:0] {ADD=0, SUB=1, MUL=2, DIV=3, RSVD=4} op_e;
+// cover ADD..DIV, ignore RSVD, illegal unused encodings 5-7
+
+SOLUTION:
+--------
+coverpoint op {
+  bins arith[] = {ADD, SUB, MUL, DIV};
+  ignore_bins ig = {RSVD};
+  illegal_bins bad = {[5:7]};
+}
+
+
+Quick reference answers:
+  bins b[4] = {[0:15]}     -> 4 bins
+  bins b[]  = {1,2,4,8}    -> 4 bins (one per element)
+  get_coverage()           -> type/merged coverage
+  get_inst_coverage()      -> this instance
+  auto_bin_max = 4 on 4-bit with no explicit bins -> at most 4 auto bins
+
+
+================================================================================
+SET 8 - HARD / SENIOR CODING
+================================================================================
+
+--------------------------------------------------------------------------------
+Q24. Parameterized covergroup
+--------------------------------------------------------------------------------
+Parameter WIDTH, cover val with: zero, all-ones, onehot, and other.
+
+SOLUTION:
+--------
+covergroup cg_val #(int WIDTH=8) (ref logic [WIDTH-1:0] val);
+  cp_zero: coverpoint (val == '0) {
+    bins is_zero = {1};
+  }
+  cp_all1: coverpoint (val == '1) {
+    bins is_all1 = {1};
+  }
+  cp_pow2: coverpoint ($onehot(val)) {
+    bins onehot = {1};
+    bins not_onehot = {0};
+  }
+endgroup
+
+// Concrete WIDTH=8 walk-ones style also accepted:
+coverpoint val {
+  bins zero = {8'h00};
+  bins all1 = {8'hFF};
+  bins walk[] = {8'h01,8'h02,8'h04,8'h08,8'h10,8'h20,8'h40,8'h80};
+  bins other = default;
+}
+
+
+--------------------------------------------------------------------------------
+Q25. Full 15-minute whiteboard: APB coverage
+--------------------------------------------------------------------------------
+Spec:
+- APB coverage: PWRITE, PADDR[7:0], sample when PENABLE && PREADY
+- Bins: write/read
+- addr: 0x00-0x0F, 0x10-0x7F, 0x80-0xFF
+- Cross dir x addr
+- Ignore reads to 0x00-0x0F if that region is write-only
+- Illegal when PADDR[1:0] != 0 (word align)
+
+SOLUTION:
+--------
+covergroup apb_cg @(posedge PCLK);
+  cp_dir: coverpoint PWRITE iff (PENABLE && PREADY) {
+    bins rd = {0};
+    bins wr = {1};
+  }
+  cp_addr: coverpoint PADDR iff (PENABLE && PREADY) {
+    bins reg_lo = {[8'h00:8'h0F]};
+    bins reg_mi = {[8'h10:8'h7F]};
+    bins reg_hi = {[8'h80:8'hFF]};
+  }
+  cp_align: coverpoint PADDR[1:0] iff (PENABLE && PREADY) {
+    bins aligned = {2'b00};
+    illegal_bins mis = {[2'b01:2'b11]};
+  }
+  cx: cross cp_dir, cp_addr iff (PENABLE && PREADY) {
+    ignore_bins wo_region_rd =
+      binsof(cp_dir.rd) && binsof(cp_addr.reg_lo);
+  }
+endgroup
+
+
+================================================================================
+BONUS - binsof / intersect PRODUCT TABLES (memorize for interviews)
+================================================================================
+
+Given:
+  cp1: x1=[0:99], x2=[100:199], x3=[200:255]
+  cp2: y1=[0:74], y2=[75:149], y3=[150:255]
+  Default cross space = 9 products
+
+Expression                                          Products
+--------------------------------------------------  --------
+binsof(cp1.x1)                                      3  <x1,y1..y3>
+binsof(cp2.y2)                                      3  <x1..x3,y2>
+binsof(cp1.x1) && binsof(cp2.y2)                    1  <x1,y2>
+binsof(cp1.x1) || binsof(cp2.y2)                    5  (union)
+binsof(cp1) intersect {[100:200]}                   6  x2,x3 x all y
+!binsof(cp1) intersect {[100:200]}                  3  x1 x all y
+!binsof(cp1) intersect {99,125,150,175}             3  x3 only
+                                                    (x1 hits 99, x2 hits
+                                                     125/150/175, x3 none)
+
+ignore_bins vs illegal_bins:
+  ignore_bins  -> outside coverage goal, removed from denominator
+  illegal_bins -> must never occur; flagged when hit
+  Neither replaces assertions/scoreboard for correctness checking.
+
+
+================================================================================
+CHEAT SHEET
+================================================================================
+
+cross      -> joint combination holes
+iff        -> sample enable / guard
+binsof     -> pick rows/cols/cells of cross matrix
+intersect  -> pick bins whose value sets overlap a set
+ignore     -> not part of coverage goal
+illegal    -> should never happen
+explosion  -> bin first, cross second, cut unreachable
+bins types -> values, ranges, arrays [], wildcard, transition,
+              ignore, illegal, default, default sequence
+
+Common mistakes:
+  1. Assuming two 100% coverpoints => 100% cross
+  2. Crossing raw wide variables (explosion)
+  3. Using addr && en when intent is addr iff(en)
+  4. iff(!reset_n) when intending post-reset sampling
+  5. Forgetting binsof(cp.x1) selects ALL products containing x1
+  6. Complementary ignores that wipe the entire cross
+  7. Using illegal_bins as the only error checker
+
+
+================================================================================
+PRACTICE PLAN
+================================================================================
+
+Timed (20-30 min):     Q1, Q9, Q16, Q19, Q25
+Predict-only:          Q4, Q5, Q20
+Debug:                 Q12, Q13, Q14, Q15
+Senior:                Q24 + explain explosion / ignore vs illegal
+
+================================================================================
+END OF FILE
+================================================================================
