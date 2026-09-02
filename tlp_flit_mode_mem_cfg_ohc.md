@@ -4,9 +4,45 @@ PCIe 6.0 Flit Mode moves several Non-Flit header bits (TH, TD, LN, AT in DW0, FB
 
 Layouts below match `hpa_tlp.sv` pack/unpack (`do_pack` / `do_unpack` / `post_randomize`) and completion OHC-A5 rules in `cif_tlp_router.sv` / `tag_manager.sv`.
 
-Bit 31 is the first bit transmitted in each DW (big-endian pack).
+Bit 31 is the first bit transmitted in each DW (big-endian pack). Solid boxes are required. Dashed boxes are optional (OHC-A on Mem/Cpl, OHC-B/C/E, payload, trailer).
 
 ---
+
+## Packet strip (diagrammatic)
+
+```mermaid
+flowchart LR
+  subgraph tlp["Flit-mode TLP"]
+    direction LR
+    DW0["DW0<br/>Fmt Type TC<br/>OHC TS Attr Len"]
+    HDR["Type-specific<br/>header DWs"]
+    OA["OHC-A<br/>A1 Mem / A3 CFG / A5 Cpl"]
+    OB["OHC-B<br/>TPH AMA"]
+    OC["OHC-C<br/>IDE / Req Seg"]
+    OE["OHC-E<br/>Vend E2E"]
+    PL["Payload"]
+    TS["Trailer TS"]
+    DW0 --> HDR --> OA --> OB --> OC --> OE --> PL --> TS
+  end
+```
+
+OHC presence is selected by DW0 `OHC[4:0]`. Pack order is always **A then B then C then E**, skipping any DW whose presence bit is 0.
+
+| OHC bits | Gate | Mem Req | CFG | Completion |
+|---|---|---|---|---|
+| [0] OHC-A | type-specific | optional A1 | **mandatory A3** | optional A5 |
+| [1] OHC-B | TPH / AMA | optional | not used | not used |
+| [2] OHC-C | RSV or IDE | optional | IDE only (RSV=0) | IDE only (RSV=0) |
+| [4:3] OHC-E | vend E2E | optional | **none** | optional |
+
+![Flit Mode Memory Request TLP](docs/diagrams/flit-mem-req-tlp.png)
+
+![Flit Mode Configuration Request TLP](docs/diagrams/flit-cfg-req-tlp.png)
+
+![Flit Mode Completion TLP](docs/diagrams/flit-cpl-tlp.png)
+
+---
+
 
 ## 1. Common DW0 (all Flit-mode TLPs)
 
@@ -38,11 +74,44 @@ Bit 31 is the first bit transmitted in each DW (big-endian pack).
 
 OHC DWs, if present, are packed **after the last header DW**, in order **A then B then C then E**. Trailer (`m_ts_payload`) follows payload.
 
+```
+OHC[4:0]
+  4  3  2  1  0
++--+--+--+--+--+
+| E | E | C | B | A |
++--+--+--+--+--+
+  |     |  |  |  +-- OHC-A 1DW  (A1 Mem / A3 CFG / A5 Cpl)
+  |     |  |  +----- OHC-B 1DW  (TPH / AMA)
+  |     |  +-------- OHC-C 1DW  (IDE / requester segment)
+  +-----+----------- OHC-E 00=none  01=1DW  10=2DW  11=4DW
+```
+
 ---
 
 ## 2. Memory Request (MRd / MWr / Atomic / DMWr)
 
 Header is 3DW (32-bit address) or 4DW (64-bit address). **FBE/LBE are not in DW1.**
+
+```
+  +--------+--------+-------------------+--------+--------+--------+--------+--------+--------+
+  |  DW0   |  DW1   | DW Addr[63:32] *  | AddrLo | OHC-A1 | OHC-B  | OHC-C  | OHC-E  | Payload| Trailer|
+  | common | Req+Tag|   64-bit only     | AT[1:0]|  opt   |  opt   |  opt   |  opt   |  MWr   |  TS    |
+  +--------+--------+-------------------+--------+--------+--------+--------+--------+--------+
+       ^                  dashed = optional
+```
+
+```mermaid
+flowchart TB
+  subgraph mem["Memory Request"]
+    direction TB
+    H["DW0 + DW1 + Addr DW(s)"]
+    A1["OHC-A1  — if PASID or explicit BE or ATS TR"]
+    B["OHC-B  — if TPH / AMA"]
+    C["OHC-C  — if RSV or IDE"]
+    rest["payload + trailer"]
+    H --> A1 --> B --> C --> rest
+  end
+```
 
 ### DW1 — Requester + Tag
 
@@ -117,6 +186,15 @@ Present if TPH, extended TPH, or AMA is used.
 
 Requester segment is **optional** on Memory Requests (RSV qualifies it). Must be present for IDE TLPs.
 
+```
+ 31              24 23              16 15               8 7    4 3 2 1 0
++------------------+------------------+------------------+------+-+-+-+-+
+| Requester Seg    | PR sent counter  |    Stream ID     | SubSt|R|r|K|T|
++------------------+------------------+------------------+------+-+-+-+-+
+```
+
+RSV is bit[3]. Non-IDE Sub-stream = `4'h7`. Completions use Sub-stream = 2.
+
 - Segment not captured on the function: do not include OHC-C.
 - Segment captured: OHC-C **may** be included on Mem requests.
 - Non-IDE: Sub-stream must be `4'h7`.
@@ -128,6 +206,24 @@ CFG completions and Mem completions use OHC-C only for IDE (see below).
 ## 3. Configuration Request (CfgRd0/1, CfgWr0/1)
 
 Always a 3DW header. **OHC-A3 is mandatory** (`m_ohc_hdr.ohc_a_present == 1`). OHC-E is not used on CFG (`ohc_ex_present == none`).
+
+```
+  +--------+--------+--------+--------+--------+--------+--------+
+  |  DW0   |  DW1   |  DW2   | OHC-A3 | OHC-C  | Payload| Trailer|
+  | common | Req+Tag| BDF+Reg|  MUST  | IDE only| CfgWr |  TS    |
+  +--------+--------+--------+--------+--------+--------+--------+
+```
+
+```mermaid
+flowchart TB
+  subgraph cfg["Configuration Request"]
+    H["DW0 + DW1 Requester/Tag + DW2 Completer BDF / ExtReg / Reg"]
+    A3["OHC-A3 MUST — Dest Seg, DSV, LBE, FBE"]
+    C["OHC-C — IDE only, RSV=0"]
+    rest["CfgWr payload + trailer"]
+    H --> A3 --> C --> rest
+  end
+```
 
 ### DW1 — same as Memory Request (Requester ID + EP + 14-bit Tag)
 
@@ -172,6 +268,26 @@ RSV (requester segment valid) **must be 0** on CFG (and on Completions). OHC-C a
 ## 4. Completion (Cpl / CplD) for Mem Req or CFG
 
 Always a 3DW header in Flit Mode (no 4th header DW). **BCM is gone. Completion Status and LA[1:0] move to OHC-A5.**
+
+```
+  +--------+--------+--------+--------+--------+--------+--------+
+  |  DW0   |  DW1   |  DW2   | OHC-A5 | OHC-C  | Payload| Trailer|
+  | common | Cpl+Tag| Req+LA |  opt   | IDE    |  CplD  |  TS    |
+  |        |  LA[6] | BC[11:0]|Status  | sub=2  |        |        |
+  +--------+--------+--------+--------+--------+--------+--------+
+                         LA[5:2]          LA[1:0]
+```
+
+```mermaid
+flowchart TB
+  subgraph cpl["Completion for Mem Req or CFG"]
+    H["DW0 + DW1 Completer/EP/LA6/Tag + DW2 Requester/LA[5:2]/ByteCount"]
+    A5["OHC-A5 optional — Dest Seg, Completer Seg, DSV, LA[1:0], Status"]
+    C["OHC-C — IDE only, RSV=0, sub-stream=2"]
+    rest["CplD payload + trailer"]
+    H --> A5 --> C --> rest
+  end
+```
 
 ### DW1 — Completer + Tag
 
@@ -248,6 +364,22 @@ LA[1:0] are **not** here.
 PCIe 6.1: OHC-A may still be sent with Dest Seg / DSV / status / LA[1:0] zeroed, Completer Segment still populated (`cif_tlp_router.sv`).
 
 If OHC-A5 is omitted, Status is implied SC and LA[1:0] implied `00b`.
+
+```mermaid
+flowchart TD
+  start[Build Completion] --> chk1{status != SC OR LA[1:0] != 00?}
+  chk1 -->|yes| must[Must send OHC-A5]
+  chk1 -->|no| cap{Segment Captured?}
+  cap -->|clear| omit[Must omit OHC-A5]
+  cap -->|set| mismatch{Mem Req RSV set AND ReqSeg != captured?}
+  mismatch -->|yes| must
+  mismatch -->|no| perm[May omit OHC-A5]
+  start --> cfg{Associated request is CFG?}
+  cfg -->|yes| dsv0[DSV=0 DestSeg=00h]
+  cfg -->|no Mem| rsv{Request had RSV?}
+  rsv -->|yes| dsv1[DSV=1 DestSeg=ReqSeg]
+  rsv -->|no| dsv0
+```
 
 ### Optional OHC-C on Completion
 
