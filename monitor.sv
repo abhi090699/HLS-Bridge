@@ -71,6 +71,14 @@ class cdn_pcie_hls_bridge_monitor extends uvm_component implements I_cdn_pcie_hl
   int unsigned m_qos_expected_count [int];
   int unsigned m_qos_observed_count [int];
 
+`ifdef FIFO_CRD_DW
+  // LBB/FIFO CRD DW expected 4DW occupancy, keyed by HLS port then type (0=P, 1=NP).
+  // Must include TLP Length even for no-data NP (MRd/CfgRd/IORd): RTL's
+  // hls_bridge_lbb_credit_counter uses the header Length field, not fmt[1].
+  int unsigned m_fifo_crd_dw_expected_count [int][int];
+  int unsigned m_fifo_crd_dw_observed_count [int][int];
+`endif // FIFO_CRD_DW
+
   // QOS analysis ports -- written whenever  IB TLP is seen
   uvm_analysis_port #(cdn_hpa_pcie_tlp) m_hls_ib_posted_qos_ap   [];
   uvm_analysis_port #(cdn_hpa_pcie_tlp) m_hls_ib_nonposted_qos_ap[];
@@ -1528,6 +1536,15 @@ endfunction
         m_hls_ib_posted_qos_ap[l_hls_port_num].write(hls_ib_posted_hal_tlp_pkt);
         m_qos_expected_count[2 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream]++;
         `uvm_info("QOS_EXP_AXI",$sformatf("POSTED: port=%0d stream=%0d group=%0d expected=%0d",l_hls_port_num, l_stream,2 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream,m_qos_expected_count[2 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream]),UVM_DEBUG)
+`ifdef FIFO_CRD_DW
+        begin
+          int unsigned l_hdr_dw, l_pay_dw, l_4dw_cnt;
+          calc_lbb_credit_4dw_cnt(hls_ib_posted_hal_tlp_pkt, l_hdr_dw, l_pay_dw, l_4dw_cnt);
+          m_fifo_crd_dw_expected_count[l_hls_port_num][0] += l_4dw_cnt;
+          `uvm_info("FIFO_CRD_DW_EXP", $sformatf("POSTED AXI: port=%0d stream=%0d hdr=%0d pay=%0d 4dw_cnt=%0d expected_total=%0d",
+            l_hls_port_num, l_stream, l_hdr_dw, l_pay_dw, l_4dw_cnt, m_fifo_crd_dw_expected_count[l_hls_port_num][0]), UVM_DEBUG)
+        end
+`endif // FIFO_CRD_DW
       end 
 
       //--- Send the IB Packet to the Posted Order Checker Component ------
@@ -1585,6 +1602,15 @@ endfunction
  		 int l_stream = int'(hls_ib_nonposted_hal_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0]);
  		 m_qos_expected_count[0 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream]++;
   		 `uvm_info("QOS_EXP_AXI",$sformatf("NONPOSTED AXI: port=%0d stream=%0d group=%0d expected=%0d", l_hls_port_num, l_stream, 0 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream,m_qos_expected_count[0 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream]),UVM_DEBUG)
+`ifdef FIFO_CRD_DW
+          begin
+            int unsigned l_hdr_dw, l_pay_dw, l_4dw_cnt;
+            calc_lbb_credit_4dw_cnt(hls_ib_nonposted_hal_tlp_pkt, l_hdr_dw, l_pay_dw, l_4dw_cnt);
+            m_fifo_crd_dw_expected_count[l_hls_port_num][1] += l_4dw_cnt;
+            `uvm_info("FIFO_CRD_DW_EXP", $sformatf("NONPOSTED AXI: port=%0d stream=%0d hdr=%0d pay=%0d 4dw_cnt=%0d expected_total=%0d",
+              l_hls_port_num, l_stream, l_hdr_dw, l_pay_dw, l_4dw_cnt, m_fifo_crd_dw_expected_count[l_hls_port_num][1]), UVM_DEBUG)
+          end
+`endif // FIFO_CRD_DW
 	 end
       end
 `ifdef DTI_TB_IN_PASSIVE_MODE
@@ -3744,6 +3770,41 @@ if(m_env_cfg.m_qos_support) begin
 
   virtual function void cover_backpressure_scenario(bit ib_en, bit ob_en);
   endfunction : cover_backpressure_scenario
+
+  //----------------------------------------------------------------------------
+  // Function: calc_lbb_credit_4dw_cnt
+  // Predict DUT lbb_credit_counter_ib_{p,np} occupancy in 4DW units.
+  //
+  // Do NOT use m_hdr_fmt[1] for header size (that bit is "with data").
+  // PCIe fmt[0] selects 4DW vs 3DW; get_header_size() already decodes this.
+  //
+  // Do NOT zero payload when fmt[1]==0. RTL still adds the TLP Length field
+  // (NP read request size). Zeroing it is what produced:
+  //   FIFO_CRD_DW_MIDTEST_ERR port=0 NP observed_4dw=0x4 > expected_4dw=0x3
+  //   (MRd_64 hdr=4, Length=2 -> DUT 2; TB had pay=0 -> 1)
+  //
+  // Length==0 means 1024 DW only when the TLP actually carries/requests data.
+  // For no-data NP, Length==0 is a 0-DW request, not 1024.
+  //----------------------------------------------------------------------------
+  virtual function void calc_lbb_credit_4dw_cnt(
+    input  cdn_hpa_pcie_tlp tlp_pkt,
+    output int unsigned     hdr_dw,
+    output int unsigned     pay_dw,
+    output int unsigned     cnt_4dw
+  );
+    hdr_dw = tlp_pkt.get_header_size() / 4; // 12B -> 3DW, 16B -> 4DW
+
+    if (tlp_pkt.m_tlp_length == 0) begin
+      // With-data / request-with-size: PCIe Length=0 encodes 1024 DW.
+      // No-data with Length=0 is a zero-length request (do not inflate to 1024).
+      pay_dw = tlp_pkt.m_hdr_fmt[1] ? 1024 : 0;
+    end
+    else begin
+      pay_dw = int'(tlp_pkt.m_tlp_length);
+    end
+
+    cnt_4dw = (hdr_dw + pay_dw + 3) / 4;
+  endfunction : calc_lbb_credit_4dw_cnt
 
 endclass : cdn_pcie_hls_bridge_monitor
 
