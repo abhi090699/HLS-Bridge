@@ -3266,6 +3266,138 @@ module hls_bridge_top #(
    ,.asf_event__ob_main_aligner_tuser_o                   (asf_event__ob_main_aligner_ob_p_tuser_o               )
    ,.asf_event__ob_main_aligner_tuserchk_o                (asf_event__ob_main_aligner_ob_p_tuserchk_o            )
   );
+
+  // Outbound Non-Posted: AXI → HAL. No DTI channel (ATS Translation Requests
+  // are IB NP; there is no OB NP DTI). DTI HLS ports are tied off.
+  hls_bridge_ob #(
+  .NUM_HLS_PORTS                       (NUM_HLS_PORTS),
+  .HLS_DW_ALIGNMENT                    (HLS_DW_ALIGNMENT),
+  .KMAX_DTI_SUPPORT                    (0),
+  .KMAX_DATAPATH_WD                    (KMAX_DATAPATH_WD),
+  .HLS_METADATA_WD                     (HLS_TX_PNP_METADATA_WD),
+  .KMAX_NUM_TLPS_PER_CLK               (KMAX_NUM_TLPS_PER_CLK),
+  .HLS_PORT_DATA_WIDTH_ARR             (HLS_PORT_DATA_WIDTH_ARR),
+  .HLS_PORT_TLPS_PER_CLK_ARR           (HLS_PORT_TLPS_PER_CLK_ARR),
+  .HLS_AXI_STR_PTR_WD_ARR              (HLS_AXI_STR_PTR_WD_ARR),
+  .HLS_AXI_END_PTR_WD_ARR              (HLS_AXI_END_PTR_WD_ARR),
+  .HLS_AXI_PKT_CNTL_WD_ARR             (HLS_AXI_PKT_CNTL_WD_ARR),
+  .HLS_AXI_CNTL_WD_ARR                 (HLS_AXI_OB_PNP_CNTL_WD_ARR),
+  .HLS_AXI_CNTL_CHK_WD_ARR             (HLS_AXI_OB_PNP_CNTL_CHK_WD_ARR),
+  .HLS_AXI_CNTLS_WD                    (HLS_AXI_OB_PNP_CNTL_WD),
+  .HLS_AXI_CNTLS_CHK_WD                (HLS_AXI_OB_PNP_CNTL_CHK_WD),
+   //---------------------------------------------------------------------------------
+   // ASF err inj
+   //---------------------------------------------------------------------------------
+   .ASF_SUPPORT                        (ASF_SUPPORT),
+   .ASF_NODE_ID_OFFSET                 (ASF_NODE_ID_OFFSET_OB_NP),
+   .ASF_ERR_INJ_SUPPORT                (ASF_ERR_INJ_SUPPORT),
+   .ASF_ERROR_INJ_DATA_WIDTH           (ASF_ERROR_INJ_DATA_WIDTH),
+   .ASF_ERROR_INJ_USER_WIDTH           (ASF_ERROR_INJ_USER_WIDTH),
+   .ASF_EVENT_TYPE_WIDTH               (ASF_EVENT_TYPE_WIDTH),
+   .ASF_EVENT_COUNT_WIDTH              (ASF_EVENT_COUNT_WIDTH),
+   .ASF_NODE_ID_WIDTH                  (ASF_NODE_ID_WIDTH),
+   .ASF_EVENT_DIAG_FIELD_WIDTH         (ASF_EVENT_DIAG_FIELD_WIDTH),
+
+   .PORT_SOURCE_LABELING               (1)
+  )
+  i_cdns_hls_bridge_ob_np
+  (
+   .k_sync_reset                                (k_sync_reset),
+   .k_sync_cell_stages                          (k_sync_cell_stages),
+
+   .core_clk                                    (core_clk),
+   .core_rst_n                                  (core_rst_n),
+
+   .k_hls_dw_alignment                          (k_hls_dw_alignment),
+
+   .hls_rx_axi_valid                            (hls_ob_nonposted_axi_valid),
+   .hls_rx_axi_data                             (hls_ob_nonposted_axi_data),
+   .hls_rx_axi_cntl                             (hls_ob_nonposted_axi_cntl),
+   .hls_rx_axi_crdgnt                           (hls_ob_nonposted_axi_crdgnt),
+   .hls_rx_axi_crdrtn                           (hls_ob_nonposted_axi_crdrtn),
+   .hls_rx_axi_activereq                        (hls_ob_nonposted_axi_activereq),
+   .hls_rx_axi_activeack                        (hls_ob_nonposted_axi_activeack),
+   .hls_rx_axi_deacthint                        (hls_ob_nonposted_axi_deacthint),
+   .hls_rx_axi_data_chk                         (hls_ob_nonposted_axi_data_chk),
+   .hls_rx_axi_cntl_chk                         (hls_ob_nonposted_axi_cntl_chk),
+
+   .hls_rx_dti_valid                            (1'b0),
+   .hls_rx_dti_data                             ({KMAX_DATAPATH_WD{1'b0}}),
+   .hls_rx_dti_cntl                             ({HLS_HAL_OB_PNP_CNTL_WD{1'b0}}),
+   .hls_rx_dti_crdgnt                           (),
+   .hls_rx_dti_crdrtn                           (1'b0),
+   .hls_rx_dti_activereq                        (1'b0),
+   .hls_rx_dti_activeack                        (),
+   .hls_rx_dti_deacthint                        (),
+   .hls_rx_dti_data_chk                         ({KMAX_DATAPATH_WD_CHK{1'b1}}),
+   .hls_rx_dti_cntl_chk                         ({HLS_HAL_OB_PNP_CNTL_CHK_WD{1'b1}}),
+
+   .hls_tx_valid                                (hls_ob_nonposted_hal_valid),
+   .hls_tx_data                                 (hls_ob_nonposted_hal_data),
+   .hls_tx_cntl                                 (hls_ob_nonposted_hal_cntl),
+   .hls_tx_crdgnt                               (hls_ob_nonposted_hal_crdgnt),
+   .hls_tx_crdrtn                               (hls_ob_nonposted_hal_crdrtn),
+   .hls_tx_activereq                            (hls_ob_nonposted_hal_activereq),
+   .hls_tx_activeack                            (hls_ob_nonposted_hal_activeack),
+   .hls_tx_deacthint                            (hls_ob_nonposted_hal_deacthint),
+   .hls_tx_data_chk                             (hls_ob_nonposted_hal_data_chk),
+   .hls_tx_cntl_chk                             (hls_ob_nonposted_hal_cntl_chk)
+
+   ,.asf_error_inj__cmd_tvalid_i                          (sub_block_error_inj__cmd_tvalid)
+   ,.asf_error_inj__tdata_i                               (sub_block_error_inj__tdata     )
+   ,.asf_error_inj__tuser_i                               (sub_block_error_inj__tuser     )
+
+   ,.asf_event__hls_labeled_axi_cntl_valid                (asf_event__hls_cntl_labeled_axi_ob_np_valid)
+   ,.asf_event__hls_labeled_axi_cntl_type                 (asf_event__hls_cntl_labeled_axi_ob_np_type)
+   ,.asf_event__hls_labeled_axi_cntl_count                (asf_event__hls_cntl_labeled_axi_ob_np_count)
+   ,.asf_event__hls_labeled_axi_cntl_node_id              (asf_event__hls_cntl_labeled_axi_ob_np_node_id)
+   ,.asf_event__hls_labeled_axi_cntl_diag_field           (asf_event__hls_cntl_labeled_axi_ob_np_diag_field)
+
+   ,.asf_event__hls_labeled_dti_cntl_valid                ()
+   ,.asf_event__hls_labeled_dti_cntl_type                 ()
+   ,.asf_event__hls_labeled_dti_cntl_count                ()
+   ,.asf_event__hls_labeled_dti_cntl_node_id              ()
+   ,.asf_event__hls_labeled_dti_cntl_diag_field           ()
+
+   ,.asf_event__hls_ob_gearbox_packer_cntl_valid          (asf_event__hls_ob_gearbox_packer_cntl_ob_np_valid      )
+   ,.asf_event__hls_ob_gearbox_packer_cntl_type           (asf_event__hls_ob_gearbox_packer_cntl_ob_np_type       )
+   ,.asf_event__hls_ob_gearbox_packer_cntl_count          (asf_event__hls_ob_gearbox_packer_cntl_ob_np_count      )
+   ,.asf_event__hls_ob_gearbox_packer_cntl_node_id        (asf_event__hls_ob_gearbox_packer_cntl_ob_np_node_id    )
+   ,.asf_event__hls_ob_gearbox_packer_cntl_diag_field     (asf_event__hls_ob_gearbox_packer_cntl_ob_np_diag_field )
+
+   ,.asf_event__hls_ob_gearbox_packer_data_valid          (asf_event__hls_ob_gearbox_packer_data_ob_np_valid      )
+   ,.asf_event__hls_ob_gearbox_packer_data_type           (asf_event__hls_ob_gearbox_packer_data_ob_np_type       )
+   ,.asf_event__hls_ob_gearbox_packer_data_count          (asf_event__hls_ob_gearbox_packer_data_ob_np_count      )
+   ,.asf_event__hls_ob_gearbox_packer_data_node_id        (asf_event__hls_ob_gearbox_packer_data_ob_np_node_id    )
+   ,.asf_event__hls_ob_gearbox_packer_data_diag_field     (asf_event__hls_ob_gearbox_packer_data_ob_np_diag_field )
+
+   ,.asf_event__hls_ob_gearbox_masker_cntl_valid          (asf_event__hls_ob_gearbox_masker_cntl_ob_np_valid      )
+   ,.asf_event__hls_ob_gearbox_masker_cntl_type           (asf_event__hls_ob_gearbox_masker_cntl_ob_np_type       )
+   ,.asf_event__hls_ob_gearbox_masker_cntl_count          (asf_event__hls_ob_gearbox_masker_cntl_ob_np_count      )
+   ,.asf_event__hls_ob_gearbox_masker_cntl_node_id        (asf_event__hls_ob_gearbox_masker_cntl_ob_np_node_id    )
+   ,.asf_event__hls_ob_gearbox_masker_cntl_diag_field     (asf_event__hls_ob_gearbox_masker_cntl_ob_np_diag_field )
+
+   ,.asf_event__hls_ob_gearbox_masker_data_valid          (asf_event__hls_ob_gearbox_masker_data_ob_np_valid      )
+   ,.asf_event__hls_ob_gearbox_masker_data_type           (asf_event__hls_ob_gearbox_masker_data_ob_np_type       )
+   ,.asf_event__hls_ob_gearbox_masker_data_count          (asf_event__hls_ob_gearbox_masker_data_ob_np_count      )
+   ,.asf_event__hls_ob_gearbox_masker_data_node_id        (asf_event__hls_ob_gearbox_masker_data_ob_np_node_id    )
+   ,.asf_event__hls_ob_gearbox_masker_data_diag_field     (asf_event__hls_ob_gearbox_masker_data_ob_np_diag_field )
+
+   ,.asf_event__ob_gearbox_aligner_tdata_o                (asf_event__ob_gearbox_aligner_ob_np_tdata_o            )
+   ,.asf_event__ob_gearbox_aligner_tdatachk_o             (asf_event__ob_gearbox_aligner_ob_np_tdatachk_o         )
+   ,.asf_event__ob_gearbox_aligner_tvalid_o               (asf_event__ob_gearbox_aligner_ob_np_tvalid_o           )
+   ,.asf_event__ob_gearbox_aligner_tvalidchk_o            (asf_event__ob_gearbox_aligner_ob_np_tvalidchk_o        )
+   ,.asf_event__ob_gearbox_aligner_tuser_o                (asf_event__ob_gearbox_aligner_ob_np_tuser_o            )
+   ,.asf_event__ob_gearbox_aligner_tuserchk_o             (asf_event__ob_gearbox_aligner_ob_np_tuserchk_o         )
+
+   ,.asf_event__ob_main_aligner_tdata_o                   (asf_event__ob_main_aligner_ob_np_tdata_o               )
+   ,.asf_event__ob_main_aligner_tdatachk_o                (asf_event__ob_main_aligner_ob_np_tdatachk_o            )
+   ,.asf_event__ob_main_aligner_tvalid_o                  (asf_event__ob_main_aligner_ob_np_tvalid_o              )
+   ,.asf_event__ob_main_aligner_tvalidchk_o               (asf_event__ob_main_aligner_ob_np_tvalidchk_o           )
+   ,.asf_event__ob_main_aligner_tuser_o                   (asf_event__ob_main_aligner_ob_np_tuser_o               )
+   ,.asf_event__ob_main_aligner_tuserchk_o                (asf_event__ob_main_aligner_ob_np_tuserchk_o            )
+  );
+
 hls_bridge_ob #(
   .NUM_HLS_PORTS                       (NUM_HLS_PORTS),
   .HLS_DW_ALIGNMENT                    (HLS_DW_ALIGNMENT),
