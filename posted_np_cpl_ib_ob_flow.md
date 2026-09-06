@@ -6,6 +6,59 @@ This snapshot keeps the Cadence class names (`cdn_pcie_hpa_cif_tlp_router`, `cdn
 
 ---
 
+## Role of `hls_bridge` — protocol bridge / router, not a transaction processor
+
+`hls_bridge` is a **format-conversion and routing layer** between the PCIe-link-facing HLS/CXS interface (HAL) and the AXI/DTI/MSI-facing HLS/CXS interfaces. It does not originate, terminate, or invent TLP content. Completions, tags, AXI5 channels, and interrupt semantics live on the other side of its boundary (`axi_bridge` / `axi_master`, GIC, or — in this module TB — CIF Router + tag manager).
+
+One line: it is a traffic-class-aware (P/NP/C), destination-aware (AXI/DTI/MSI) credit-flow-controlled pipe. It converts formats, enforces posted ordering, and merges/splits streams. It is intentionally “dumb” at the transaction-semantics level, which is why module-level verification has to supply CIF Router, tag manager, and `tlp2cxs`.
+
+```
+  PCIe Core HAL          hls_bridge                 Neighbors (not this IP)
+  (HLS CXS P/NP/C)   classify / route / align      axi_bridge / axi_master
+         <---------------------------->            (AXI5 AW/AR/R/B, Cpl gen)
+                     credit handshake              GIC (MSI AXIS consume)
+                     P-P ordering (IB P only)      SMMU (DTI ATS)
+                     AXI+DTI merge (OB)
+                     MSI TLP → AXIS (format)
+```
+
+### What it does
+
+| Function | Where it shows up in this tree | What it is not |
+| --- | --- | --- |
+| **1. Classify / route** | IB decoder uses metadata `hls_bridge_pkt_route_info` + `hls_bridge_port_info` (offsets `RX_METADATA_PKT_ROUTING_INFO_*` / `PORT_INFO_OFFSET` on each `hls_bridge_ib`). Monitor `predict_ib_pkt_routing` copies the same field: `00`/`01` AXI, `10` MSI, `11` DTI. The stamp comes from the producer (core / AXI-bridge / TB `tlp2cxs`), not from payload inspection inside the bridge. | Not BAR decode of TLP address as the primary mux (that is already in `routing_info` / `port_info`). |
+| **2. Enforce PCIe posted ordering** | Only `i_cdns_hls_bridge_ib_p` has `ORDERING_SUPPORT=1`. IB NP and IB C set it to `0`. TB `ib_posted_order_checker.sv` `check_p_p_ordering` models fan-out to AXI/DTI/MSI queues; RO / `ro_en` / `vc_en` / `tc_en` relax AXI checks. | Not content generation. NP/C are not ordered by this block. |
+| **3. Width / rate adapt** | ASF event maps in `hls_bridge_top.v`: AXI aligner, AXI gearbox, DTI aligner (IB); labeled AXI/DTI, gearbox packer/masker, main aligner (OB). `k_hls_dw_alignment` and `HLS_PORT_DATA_WIDTH_ARR` / `KMAX_DATAPATH_WD` (512 vs 1024). OB P/C merge AXI+DTI (`KMAX_DTI_SUPPORT`); OB NP does not. | Not TLP rebuild. Payload bits are shifted/packed, not reinterpreted. |
+| **4. Credit flow control** | Every HLS port is `valid` / `data` / `cntl` / `crdgnt` / `crdrtn` / `activereq` / `activeack` / `deacthint`. Top comment: valid is asserted only when credits are available. `i_cdns_hls_bridge_credit` republishes posted/NP header+payload limits (`crd_m_lmt_*` / `crd_s_lmt_*`, plus DTI posted). `crd_lmt_if.sv` is that interface in the TB. | Not a transaction ACK (no SC/CA/UR, no BRESP). |
+| **5. MSI local delivery (format convert)** | IB P only: `ib_posted_msi_*` → `i_cdns_hls_bridge_msi` (`msi.v`) → `hls_bridge_msi_fsm_tx` (`msi_fsm.v`) → `axis_msi_m_tvalid/tdata` to the GIC. `tvalid`/`tready` is the ack. QoS/DC sidebands (`qos_data`, `dc_data`) are stream IDs / counts, not interrupt policy. IB NP/C MSI ports are tied off. | Not GIC/SPI generation. MemWr MSI TLP → AXI-Stream beat. |
+| **6. Forward pre-built completions** | `i_cdns_hls_bridge_ob_c` takes `hls_ob_compl_axi_*` (and DTI Cpl) already packed as HLS flits. IB C `hls_ib_compl_hal_cntl` documents `CPL_COMPLETE` and `CPL_ERROR_CODE` as **carried** fields (poison, byte-count mismatch, UR/CA, timeout, FLR) — the core/AXI master filled them. In SoC, `axi_master_rd_cpl_generator` (not in this snapshot) owns tag/SC/CA/UR/byte-count/lower-address. In **this module TB**, `cif_tlp_router.write_ib_np_req_port` / `send_cpl_to_cxs` does that job. | `hls_bridge_ob` does not compute Cpl status or byte count. |
+
+QoS (`qos.v` / `i_cdns_hls_bridge_qos`) and delivered-count (`delivered.v`) only **aggregate** “a TLP left this port” counts toward HAL. They do not complete requests.
+
+AXI-Lite on `hls_bridge_top` is CSR (MSI GIC cfg, debug order disable, packet counters), not the AXI5 data path.
+
+### What it explicitly does not do
+
+- **No tag CAM/LUT/pool** in the HLS bridge instances. Tags live in TLP headers. `tag_manager.sv` (`m_available_tags`, `m_consumed_tags`, `compl_lut`) is TB (and SoC AXI master), not `hls_bridge`.
+- **No SC/CA/UR or byte-count generation.** CIF Router randomizes `temp_cpl_status` and copies `m_tlp_tag` from the NP request.
+- **No AXI5.** No AWVALID/ARVALID/RDATA/BRESP on these six pipes — HLS CXS only. AXI protocol is `axi_bridge` / `axi_master` one level out (or CXS VIP in this TB).
+- **No payload interpretation.** Routing is metadata `routing_info` + `port_info` (+ MSI fork on IB P). Decoder does not parse MemWr vs Cfg vs ATS from data beats to choose a destination.
+
+### Who owns transaction semantics (module TB vs SoC)
+
+| Semantic | SoC (outside this IP) | This HLS-bridge module TB |
+| --- | --- | --- |
+| Allocate/release NP tags | AXI master NP outstanding table | `tag_manager.generate_tag` / `write_ib_compl_cbport` |
+| Build Cpl (status, BC, lower addr) | `axi_master_rd_cpl_generator` | `cif_tlp_router.write_ib_np_req_port` |
+| Pack TLP → CXS flits | AXI HLS / HAL | `cdn_pcie_hpa_tlp2cxs_seq` |
+| AXI5 read/write | `axi_bridge` / `axi_master` | CXS agents on `hls_*_axi_*` |
+| Interrupt | GIC | AXIS MSI VIP + scoreboard |
+| ATS | SMMU / DTI wrapper neighbor | DTI CXS envs when `KMAX_DTI_SUPPORT` |
+
+That split is why Flows 2↔6 (tag pool) and 5↔3 (synthesized OB Cpl) are **TB/neighbor** loops around a pass-through DUT.
+
+---
+
 ## Direction naming
 
 | Term | Meaning |
