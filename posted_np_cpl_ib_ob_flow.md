@@ -227,6 +227,48 @@ Credit on OB posted is a pass-through handshake (`valid`/`crdgnt`/`crdrtn`/`acti
 
 ---
 
+## How a completion is generated for an NP request
+
+**The DUT never builds a Completion TLP.** `hls_bridge_ib_np` only forwards the NP; `hls_bridge_ob_c` only forwards a Cpl that is already packed. Who *constructs* the Cpl depends on which NP it is:
+
+| NP direction | Completer | Who builds the Cpl |
+| --- | --- | --- |
+| **IB NP** (HAL → AXI): remote read/cfg/io hitting this device | Completer = AXI-side client | **Module TB:** CIF Router `write_ib_np_req_port`. **SoC:** `axi_master_rd_cpl_generator` (not in this tree). |
+| **OB NP** (AXI → HAL): this device's read going to the link | Completer = remote on the link | Remote / HAL VIP. CIF Router does **not** synthesize that Cpl. DUT `ib_c` forwards `hls_ib_compl_*`; `tag_manager.write_ib_compl_cbport` only **matches** the tag. |
+
+### IB NP → OB Cpl (CIF Router is the completer in this TB)
+
+```
+HAL IB NP  →  DUT ib_np  →  hls_ib_nonposted_axi
+                              monitor process_hls_ib_nonposted_axi_pkt_ended
+                              ib_np_req_ap.write(tlp)     // skipped if link-down
+                              env: connect → cif_router.ib_np_req_export
+                              write_ib_np_req_port()      // BUILD the Cpl TLP
+                              cpl_trans_q.push_back(...)
+send_cpl_to_cxs() (bg)     →  tlp2cxs_compl_seq
+                              hls_ob_compl_axi  →  DUT ob_c  →  HAL OB Cpl
+```
+
+`write_ib_np_req_port` (`cif_tlp_router.sv`) clones the NP, then:
+
+1. **Echo identity from the NP** (not a new tag): `m_tlp_tag`, `m_tlp_t8`, `m_tlp_t9`, `m_tlp_14_bit_tagscale`, TC, Attr0, Requester ID. Completer ID comes from the BAR-hit `np_req_hit_dev_cfg` (or the NP’s completer ID for CFG).
+2. **Fmt/type from NP class**
+   - IOWr / CfgWr / DMWr → `Cpl`, length 0, byte_count 4, lower_addr 0
+   - IORd / CfgRd → `CplD` length 1 (or `Cpl` if status ≠ SC); payload random or zeros
+   - MRd / MRdLk → `CplD`; byte_count from length + FBE/LBE; lower_addr from address + first set FBE bit; optional **split** Cpls on 128 B RCB / MPS
+   - UIOMRd → `UIORdCplD` / `UIORdCpl`
+3. **Status** `temp_cpl_status`: default **SC**. If `m_enable_ob_ca_status`, randomize SC / CA / UR. Non-SC CplD is rewritten to `Cpl` with no data.
+4. Pack bytes, update ECRC, **push `cpl_trans_q`**.
+5. `send_cpl_to_cxs` pops FIFO order (`cpl_trans_id=0`), `tlp2cxs_compl_seq.start_item` onto `m_ob_cpl_tlp_sqr` → OB Cpl AXI CXS agent.
+
+The DUT `ob_c` instance never sees the NP; it only sees the CXS Cpl flit.
+
+### OB NP → IB Cpl (remote completer)
+
+CIF Router’s posted/NP **stim** path (`tlp_router`) sends the NP through `tag_manager.gen_req` (allocates tag) onto `hls_ob_nonposted_axi`. Completions come back as HAL IB Cpl. No `write_ib_np_req_port` on that path.
+
+---
+
 ## TB environments (one CXS env per pipeline)
 
 `env.sv` builds six HAL CXS envs plus per-port AXI CXS envs:
