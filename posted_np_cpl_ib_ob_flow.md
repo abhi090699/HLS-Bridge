@@ -59,6 +59,136 @@ That split is why Flows 2↔6 (tag pool) and 5↔3 (synthesized OB Cpl) are **TB
 
 ---
 
+## Pictures of the flow
+
+### System context and the six pipes
+
+![Six independent HLS pipelines in hls_bridge_top](docs/diagrams/hls-bridge-six-pipelines.png)
+
+```mermaid
+flowchart LR
+  subgraph HAL["PCIe HAL (link)"]
+    IBP_H[hls_ib_posted_hal]
+    IBNP_H[hls_ib_nonposted_hal]
+    IBC_H[hls_ib_compl_hal]
+    OBP_H[hls_ob_posted_hal]
+    OBNP_H[hls_ob_nonposted_hal]
+    OBC_H[hls_ob_compl_hal]
+  end
+
+  subgraph DUT["hls_bridge_top  —  router / pipe"]
+    ib_p["ib_p  ORDERING=1  MSI+DTI"]
+    ib_np["ib_np  ORDERING=0  DTI"]
+    ib_c["ib_c  DTI off"]
+    ob_p["ob_p  AXI+DTI merge"]
+    ob_np["ob_np  AXI only"]
+    ob_c["ob_c  AXI+DTI merge"]
+    msi[hls_bridge_msi]
+  end
+
+  subgraph CLIENT["AXI / DTI / GIC"]
+    AXI_P[hls_ib_posted_axi]
+    AXI_NP[hls_ib_nonposted_axi]
+    AXI_C[hls_ib_compl_axi]
+    AXI_OBP[hls_ob_posted_axi]
+    AXI_OBNP[hls_ob_nonposted_axi]
+    AXI_OBC[hls_ob_compl_axi]
+    DTI[dti_hls_wrapper]
+    GIC[axis_msi_m → GIC]
+  end
+
+  IBP_H --> ib_p
+  ib_p --> AXI_P
+  ib_p --> DTI
+  ib_p --> msi --> GIC
+
+  IBNP_H --> ib_np
+  ib_np --> AXI_NP
+  ib_np --> DTI
+
+  IBC_H --> ib_c --> AXI_C
+
+  AXI_OBP --> ob_p
+  DTI --> ob_p
+  ob_p --> OBP_H
+
+  AXI_OBNP --> ob_np --> OBNP_H
+
+  AXI_OBC --> ob_c
+  DTI --> ob_c
+  ob_c --> OBC_H
+```
+
+IB = HAL → DUT → client. OB = client → DUT → HAL. Posted IB can also leave as MSI AXIS or DTI; OB NP has no DTI.
+
+### IB Posted destination fork (`routing_info`)
+
+![IB Posted routing_info fork to AXI, MSI, DTI](docs/diagrams/hls-bridge-ib-posted-route.png)
+
+```mermaid
+flowchart TB
+  HAL["HAL  hls_ib_posted_hal_*"] --> DUT["i_cdns_hls_bridge_ib_p"]
+  DUT --> DEC{"metadata routing_info<br/>already stamped — not payload decode"}
+  DEC -->|"2'b00 / 2'b01"| ORD["posted ordering"] --> AXI["hls_ib_posted_axi_*"]
+  DEC -->|"2'b10 MSI"| MSI["hls_bridge_msi → fsm_tx"] --> GIC["axis_msi_m  MemWr→AXIS"]
+  DEC -->|"2'b11 DTI"| DTI["hls_ib_posted_dti_*"] --> SMMU["dti_hls_wrapper"]
+```
+
+### Two closed loops (TB/neighbor semantics around a pass-through DUT)
+
+![Tag-pool loop and echoed-completion loop](docs/diagrams/hls-bridge-closed-loops.png)
+
+**Loop A — OB NP (Flow 2) ↔ IB Cpl (Flow 6)** — tag allocated, then released:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant SEQ as Test seq
+  participant CIF as CIF Router
+  participant TM as tag_manager
+  participant CXS as tlp2cxs_np
+  participant OBNP as DUT ob_np
+  participant LINK as HAL / link
+  participant IBC as DUT ib_c
+  participant MON as Monitor
+
+  SEQ->>CIF: NP TLP (no tag yet)
+  CIF->>TM: ob_np_req_ap
+  TM->>TM: pop m_available_tags, push m_consumed_tags, compl_lut
+  TM->>CXS: gen_req  {t9,t8,tag} in TLP header
+  CXS->>OBNP: hls_ob_nonposted_axi
+  OBNP->>LINK: hls_ob_nonposted_hal  (forward only)
+  LINK->>IBC: hls_ib_compl_hal
+  IBC->>MON: hls_ib_compl_axi
+  MON->>TM: ib_compl_req_ap
+  TM->>TM: match tag, delete lut, push m_available_tags
+```
+
+**Loop B — IB NP (Flow 5) → OB Cpl (Flow 3)** — DUT does not complete; TB echoes the tag:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant LINK as HAL / link
+  participant IBNP as DUT ib_np
+  participant MON as Monitor
+  participant CIF as CIF Router
+  participant CXS as tlp2cxs_compl
+  participant OBC as DUT ob_c
+
+  LINK->>IBNP: hls_ib_nonposted_hal
+  IBNP->>MON: hls_ib_nonposted_axi  (forward only)
+  MON->>CIF: ib_np_req_ap
+  CIF->>CIF: write_ib_np_req_port  echo m_tlp_tag, SC/CA/UR, BC
+  CIF->>CXS: send_cpl_to_cxs
+  CXS->>OBC: hls_ob_compl_axi
+  OBC->>LINK: hls_ob_compl_hal  (forward only)
+```
+
+Posted Flows 1 and 4 never enter `tag_manager` (except UIO posted writes).
+
+---
+
 ## Direction naming
 
 | Term | Meaning |
