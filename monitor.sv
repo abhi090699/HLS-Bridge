@@ -1481,8 +1481,28 @@ endfunction
       //- Predict where the inbound pkt should be routed to. -------------------
       predict_ib_pkt_routing(.msg_id(l_msg_id), .tlp_pkt(hls_ib_posted_hal_tlp_pkt), .route_to(l_route_to), .hls_port_num(l_hls_port_num));
 
+      l_stream = int'(hls_ib_posted_hal_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0]);
+
       //- Push packet to scoreboard --------------------------------------------
       if(l_route_to == ROUTE_TO_MSI) begin
+        `uvm_info({l_msg_id, "[QOS_POSTED_MSI]"},$sformatf("Posted TLP routed to MSI: stream=%0d", hls_ib_posted_hal_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0]),UVM_DEBUG)
+`ifdef HLSB_QOS_SUPP
+        if (parameters_cfg_pkg::LBB_SUPPORT) begin
+          int l_group = l_stream;
+          m_qos_expected_count[l_group]++;
+          `uvm_info("QOS_EXP_MSI", $sformatf("MSI -> P group=%0d (stream=%0d); expected=%0d",l_group, l_stream, m_qos_expected_count[l_group]), UVM_MEDIUM)
+        end
+`endif
+`ifdef FIFO_CRD_DW
+        begin
+          int unsigned l_hdr_dw, l_pay_dw, l_4dw_cnt;
+          calc_lbb_credit_4dw_cnt(hls_ib_posted_hal_tlp_pkt, l_hdr_dw, l_pay_dw, l_4dw_cnt);
+          m_fifo_crd_dw_expected_count[l_hls_port_num][0] += l_4dw_cnt; // type 0 = Posted
+          `uvm_info("FIFO_CRD_DW_EXP", $sformatf("POSTED MSI: port=%0d stream=%0d hdr=%0d pay=%0d 4dw_cnt=%0d expected_total=%0d tlp_length=%0d prefixes=%0d hdr_fmt=%0b",
+            l_hls_port_num, l_stream, l_hdr_dw, l_pay_dw, l_4dw_cnt, m_fifo_crd_dw_expected_count[l_hls_port_num][0],
+            hls_ib_posted_hal_tlp_pkt.m_tlp_length, hls_ib_posted_hal_tlp_pkt.m_max_no_of_prefixes, hls_ib_posted_hal_tlp_pkt.m_hdr_fmt), UVM_DEBUG)
+        end
+`endif // FIFO_CRD_DW
 
         //-- Check if any order checking disabled ----------------------------------
         l_any_dbg_dis_order_chk = hls_bridge_regmodel.hls_bridge_regs_memory_map_wrapper_hls_bridge_regs.hls_bridge_dbg_order.dbg_dis_per_port_o_chk.get_mirrored_value() || hls_bridge_regmodel.hls_bridge_regs_memory_map_wrapper_hls_bridge_regs.hls_bridge_dbg_order.dbg_dis_o_chk_dti.get_mirrored_value() || hls_bridge_regmodel.hls_bridge_regs_memory_map_wrapper_hls_bridge_regs.hls_bridge_dbg_order.dbg_dis_o_chk_msi.get_mirrored_value();
@@ -1506,17 +1526,18 @@ endfunction
         //- If order checking is disabled, do not send the delivered count to the scoreboard.This is because the RTL simply adds the delivered count value, making prediction difficult.
         //- It's not possible to predict when the delivered count module will process the MSI Delivered Count value which is generated internally in the design.
         //- Therefore, instead of checking each individual packet, it should be sufficient to verify that the received and expected delivered counts match at the end of the test.
-        if(l_any_dbg_dis_order_chk == 0 && parameters_cfg_pkg::NUM_HLS_PORTS == 1) begin
-          m_dc_stream_scoreboard.write_expected_tr(msi_dc_stream_pkt); 
-        end
+        //- DISABLED: per-packet DC scoreboard removed. The DUT DC module merges/accumulates
+        //- multiple delivered-count packets into a single one (sum of counters), which the
+        //- per-packet scoreboard cannot predict. Total DC equality is verified by
+        //- m_total_expected_delivered_count vs m_total_received_delivered_count in check_phase.
+        // if(l_any_dbg_dis_order_chk == 0 && parameters_cfg_pkg::NUM_HLS_PORTS == 1) begin
+        //   m_dc_stream_scoreboard.write_expected_tr(msi_dc_stream_pkt); 
+        // end
 
         cover_msi_ports_active_cycle_combinations(m_ob_p_ports_active | m_ob_np_ports_active | m_ob_compl_ports_active);
         m_ob_p_ports_active = 0;
         m_ob_np_ports_active = 0;
         m_ob_compl_ports_active = 0;
-
-        l_stream = int'(hls_ib_posted_hal_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0]);
-
 `ifndef HLS_BRIDGE_TB_IN_PASSIVE_MODE
         msi_clk_gater_vif.unfinished_packets++;
 `endif
@@ -1524,24 +1545,44 @@ endfunction
 `ifdef DTI_TB_IN_PASSIVE_MODE
       else if(l_route_to == ROUTE_TO_DTI) begin
         m_hls_ib_posted_dti_scoreboard.write_expected_tr(hls_ib_posted_hal_cxs_pkt);
-        `uvm_info({l_msg_id, "[QOS_POSTED_DTI]"},$sformatf("Posted TLP to QOS AP via DTI: stream=%0d", hls_ib_posted_hal_tlp_pkt.hls_ib_p_np_meta_s.idgroup[2:0]),UVM_DEBUG)
-        m_hls_ib_posted_qos_ap[0].write(hls_ib_posted_hal_tlp_pkt);
-        m_qos_expected_count[2 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream]++;
-        `uvm_info("QOS_EXP_DTI",$sformatf("POSTED DTI: stream=%0d group=%0d expected=%0d",l_stream,2 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream,
-        m_qos_expected_count[2 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream]),UVM_DEBUG)
-      end
+`ifdef HLSB_QOS_SUPP
+        if (parameters_cfg_pkg::LBB_SUPPORT) begin
+          int l_group = 2 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream;
+          `uvm_info({l_msg_id, "[QOS_POSTED_DTI]"}, $sformatf("Posted TLP to QOS AP via DTI: stream=%0d", l_stream), UVM_DEBUG)
+          m_hls_ib_posted_qos_ap[0].write(hls_ib_posted_hal_tlp_pkt);
+          m_qos_expected_count[l_group]++;
+          `uvm_info("QOS_EXP_DTI", $sformatf("POSTED DTI: stream=%0d P group=%0d expected=%0d",l_stream, l_group, m_qos_expected_count[l_group]), UVM_DEBUG)
+        end
 `endif
-      else if(l_route_to == ROUTE_TO_AXI) begin
-        m_hls_ib_posted_cxs_scoreboard[l_hls_port_num].write_expected_tr(hls_ib_posted_hal_cxs_pkt);
-        m_hls_ib_posted_qos_ap[l_hls_port_num].write(hls_ib_posted_hal_tlp_pkt);
-        m_qos_expected_count[2 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream]++;
-        `uvm_info("QOS_EXP_AXI",$sformatf("POSTED: port=%0d stream=%0d group=%0d expected=%0d",l_hls_port_num, l_stream,2 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream,m_qos_expected_count[2 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream]),UVM_DEBUG)
 `ifdef FIFO_CRD_DW
         begin
           int unsigned l_hdr_dw, l_pay_dw, l_4dw_cnt;
           calc_lbb_credit_4dw_cnt(hls_ib_posted_hal_tlp_pkt, l_hdr_dw, l_pay_dw, l_4dw_cnt);
-          m_fifo_crd_dw_expected_count[l_hls_port_num][0] += l_4dw_cnt;
-          `uvm_info("FIFO_CRD_DW_EXP", $sformatf("POSTED AXI: port=%0d stream=%0d hdr=%0d pay=%0d 4dw_cnt=%0d expected_total=%0d",
+          m_fifo_crd_dw_expected_count[l_hls_port_num][0] += l_4dw_cnt; // type 0 = Posted
+          `uvm_info("FIFO_CRD_DW_EXP", $sformatf("POSTED DTI: port=%0d stream=%0d hdr=%0d pay=%0d 4dw_cnt=%0d expected_total=%0d tlp_length=%0d prefixes=%0d hdr_fmt=%0b",
+            l_hls_port_num, l_stream, l_hdr_dw, l_pay_dw, l_4dw_cnt, m_fifo_crd_dw_expected_count[l_hls_port_num][0],
+            hls_ib_posted_hal_tlp_pkt.m_tlp_length, hls_ib_posted_hal_tlp_pkt.m_max_no_of_prefixes, hls_ib_posted_hal_tlp_pkt.m_hdr_fmt), UVM_DEBUG)
+        end
+`endif // FIFO_CRD_DW
+      end
+`endif
+      else if(l_route_to == ROUTE_TO_AXI) begin
+        m_hls_ib_posted_cxs_scoreboard[l_hls_port_num].write_expected_tr(hls_ib_posted_hal_cxs_pkt);
+`ifdef HLSB_QOS_SUPP
+        if (parameters_cfg_pkg::LBB_SUPPORT) begin
+          int l_group = 2 * parameters_cfg_pkg::NUM_TLP_STREAMS + l_stream;
+          `uvm_info({l_msg_id, "[QOS_POSTED_AXI]"}, $sformatf("Posted TLP to QOS AP via AXI: stream=%0d", l_stream), UVM_DEBUG)
+          m_hls_ib_posted_qos_ap[l_hls_port_num].write(hls_ib_posted_hal_tlp_pkt);
+          m_qos_expected_count[l_group]++;
+          `uvm_info("QOS_EXP_AXI", $sformatf("POSTED: port=%0d stream=%0d P group=%0d expected=%0d",l_hls_port_num, l_stream, l_group, m_qos_expected_count[l_group]), UVM_DEBUG)
+        end
+`endif
+`ifdef FIFO_CRD_DW
+        begin
+          int unsigned l_hdr_dw, l_pay_dw, l_4dw_cnt;
+          calc_lbb_credit_4dw_cnt(hls_ib_posted_hal_tlp_pkt, l_hdr_dw, l_pay_dw, l_4dw_cnt);
+          m_fifo_crd_dw_expected_count[l_hls_port_num][0] += l_4dw_cnt; // type 0 = Posted
+          `uvm_info("FIFO_CRD_DW_EXP", $sformatf("POSTED AXI: port=%0d stream=%0d hdr=%0d pay=%0d 4dw_cnt=%0d expected_total=%0d tlp_length=%0d prefixes=%0d hdr_fmt=%0b",
             l_hls_port_num, l_stream, l_hdr_dw, l_pay_dw, l_4dw_cnt, m_fifo_crd_dw_expected_count[l_hls_port_num][0]), UVM_DEBUG)
         end
 `endif // FIFO_CRD_DW
