@@ -1,4 +1,97 @@
+# Flit Mode vs Non-Flit Mode (PCIe)
+
+**Non-Flit Mode (NFM)** is the packetized Data Link used through PCIe 5.0 (8b/10b or 128b/130b). **Flit Mode (FM)** is required at 64 GT/s (PCIe 6.0+) and optional at lower rates when both ends advertise flit capability. The HLS Bridge `misc_flit_mode` / `k_flit_mode_support` straps select this path.
+
+![PCIe Non-Flit Mode vs Flit Mode](docs/diagrams/pcie-nfm-vs-fm.png)
+
+```mermaid
+flowchart LR
+  subgraph nfm["NFM Gen1-5"]
+    Pfx["PASID / TPH / IDE / E2E prefixes"]
+    H1["TLP header DW0-DWn"]
+    Pay1["payload"]
+    Lcrc["LCRC + optional ECRC"]
+    Pfx --> H1 --> Pay1 --> Lcrc
+  end
+  subgraph fm["FM Gen6+"]
+    Lpx["optional local prefix"]
+    H2["TLP header DW0-DWn"]
+    Ohc["OHC-A/B/C/E"]
+    Pay2["payload"]
+    Ts["TS trailer ECRC/MAC"]
+    Lpx --> H2 --> Ohc --> Pay2 --> Ts
+  end
+```
+
+## Link / Data Link (not TLP bits)
+
+| | NFM | FM |
+|---|---|---|
+| Physical | 2.5–32 GT/s; 8b/10b or 128b/130b | 64 GT/s PAM4 (also usable after downtraining if flit negotiated) |
+| Transfer unit | TLP / DLLP framed with STP / SDP tokens | Fixed **256-byte flit** (TLPs packed into flits; idle/NOP flits) |
+| Protection | Per-TLP **LCRC**; replay of TLPs | Per-flit **FEC + CRC**; replay of flits |
+| DLLP | Separate SDP packets (InitFC, UpdateFC, ACK/NAK, PM) | Carried **inside the flit** (no SDP token) |
+| Ack/replay | TLP sequence numbers + ACK/NAK DLLP | Flit sequence / replay; TLP SeqNum is not the NFM LCRC model |
+| Flow control | Posted / NP / Cpl credits in DLLPs | Same TLP credit classes, scheduled on flit boundaries |
+| CXL PBR | Optional PTH DW before header | Requires `k_flit_mode_support` and CXL |
+
+## Transaction layer header
+
+### DW0
+
+```
+NFM DW0
+ 31            24 23 22    20 19 18  17 16 15 14 13 12 11 10 9          0
++----------------+--+-------+--+----+--+--+--+--+--+--+--+------------+
+| Fmt | Type     |T9|  TC   |T8|Attr2|LN|TH|TD|EP|Attr|AT|   Length    |
++----------------+--+-------+--+----+--+--+--+--+--+--+--+------------+
+
+FM DW0
+ 31            24 23     21 20            16 15     13 12 11  10 9          0
++----------------+---------+----------------+---------+--+------+------------+
+| Fmt | Type     |  TC     |     OHC[4:0]   |  TS[2:0]|A2| Attr |   Length    |
++----------------+---------+----------------+---------+--+------+------------+
+```
+
+| DW0 field | NFM | FM |
+|---|---|---|
+| T9 / T8 (tag[9:8]) | In DW0 | Moved into DW1 Tag[13:8] |
+| LN, TH, TD, EP, AT | In DW0 | **Removed from DW0**. EP in DW1. AT on Mem address DW. TD via **TS**. TH/PH via **OHC-B**. LN TLP hint gone (LN **messages** also not used in FM) |
+| OHC[4:0] | — | Presence of OHC-A/B/C/E |
+| TS[2:0] | — | Trailer size (none / 1DW ECRC / IDE MAC±PCRC) |
+| Mem32 Type | `00000b` | `00011b` |
+
+### Prefixes vs OHC
+
+| Function | NFM | FM |
+|---|---|---|
+| PASID | End-to-end TLP prefix before header | **OHC-A1** (Mem) or **OHC-A4** (Msg) |
+| TPH / Ext TPH / AMA | TH in DW0 + PH in address DW; TPH prefix | **OHC-B** (ST, PH, HV, AMA). AMA constrained off in NFM unless ext-TPH possible |
+| IDE | IDE TLP prefix (Fmt `100`, Type `10010`) | **OHC-C** (Stream ID, sub-stream, K, T). Sub-stream `7h` if not IDE |
+| Vendor E2E prefixes | Prefix DWs; count limited by Max E2E Prefix | **OHC-E** 0/1/2/4 DW; NFM Max E2E limit does not apply the same way |
+| Local / vendor-L prefixes | Before header | Still **before** FM header (only local prefixes pack in front) |
+| CFG + E2E | Allowed per prefix rules | **OHC-E not used on CFG** |
+
+### Per-type header
+
+| Topic | NFM | FM |
+|---|---|---|
+| Mem / IO / CFG FBE LBE | DW1 bytes 7–6 | **OHC-A1/A2/A3**. Mem may omit OHC-A and imply `F`/`F` |
+| ATS Translation NW | Address[0] (and CXL Src) | **OHC-A1[31]**; AT still on address DW |
+| 10/14-bit Tag | T9/T8 in DW0 + Tag in DW1 | Full Tag[13:0] in DW1 (Mem/CFG/Cpl). **MSG has no Tag** in FM DW1 |
+| Completion Status + BCM | DW1 with Byte Count | **BCM removed**. Status + LA[1:0] in **OHC-A5** (omit A5 ⇒ SC and LA[1:0]=00) |
+| Completion Tag + LA | DW2: Tag + LA[6:0] | DW1: Tag + LA[6]; DW2: LA[5:2] + Byte Count |
+| MSG DW1 byte 6 | Tag (usually 0) | ITAG / SSE / VDM / Rsvd + Msg Code in byte 7 |
+| Segmentation | — | Dest / Requester / Completer segments in OHC-A3/A4/A5 and OHC-C RSV |
+| UIO (unordered I/O) | Not used | Extra Cpl types / VCs when `NUM_UIO_VCS` and flit negotiated |
+| ECRC | TD=1, 1DW after payload | **TS**=1DW ECRC trailer (or IDE MAC/PCRC sizes) |
+
+HLS Bridge: `REQ_SEG_IN_TLP_IS_VALID` in posted/NP/Cpl HAL metadata is **only valid in Flit Mode** (insert captured segment into OHC-A5 or OHC-C).
+
+---
+
 # Flit-mode TLP fields: Memory Request, Completion, CFG, and Message (with optional OHC)
+
 
 PCIe 6.0 Flit Mode moves several Non-Flit header bits (TH, TD, LN, AT in DW0, FBE/LBE, Completion Status, BCM) into Orthogonal Header Content (OHC) DWs that follow the 3DW/4DW header. Presence of each OHC DW is advertised in the 5-bit **OHC** field of DW0.
 
