@@ -2,6 +2,8 @@
 
 **Non-Flit Mode (NFM)** is the packetized Data Link used through PCIe 5.0 (8b/10b or 128b/130b). **Flit Mode (FM)** is required at 64 GT/s (PCIe 6.0+) and optional at lower rates when both ends advertise flit capability. The HLS Bridge `misc_flit_mode` / `k_flit_mode_support` straps select this path.
 
+Basic interview Q&A: [`fm_nfm_interview_questions.md`](fm_nfm_interview_questions.md).
+
 ![PCIe Non-Flit Mode vs Flit Mode](docs/diagrams/pcie-nfm-vs-fm.png)
 
 ```mermaid
